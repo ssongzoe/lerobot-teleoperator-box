@@ -43,8 +43,8 @@ LEFT_EE_FEATURES: tuple[str, ...] = (
 # The exact direction can later be adjusted in BoxVr.get_action() if the
 # physical left and right grippers use opposite conventions.
 
-RIGHT_GRIPPER_FEATURE = "right_gripper.pos"
-LEFT_GRIPPER_FEATURE = "left_gripper.pos"
+RIGHT_GRIPPER_FEATURE = "right_gripper_0"
+LEFT_GRIPPER_FEATURE = "left_gripper_0"
 
 
 BIMANUAL_EE_FEATURES: tuple[str, ...] = (

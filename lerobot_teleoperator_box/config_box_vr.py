@@ -19,6 +19,9 @@ class BoxVrConfig(TeleoperatorConfig):
     Each arm therefore outputs 6 values. Both arms output 12 values in total.
     Gripper features are added only when ``use_gripper`` is enabled.
     """
+    # RB-Y1 read-only connection for state and forward kinematics.
+    robot_address: str = "192.168.30.1:50051"
+    robot_model: str = "m"  # "a" | "m" | "ub"
 
     # UDP address on this computer.
     local_ip: str = "0.0.0.0"
