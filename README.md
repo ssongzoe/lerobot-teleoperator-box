@@ -1,0 +1,80 @@
+# LeRobot Teleoperator Box
+
+Meta Quest VR을 사용하여 RB-Y1 양팔의 Cartesian End-Effector pose를 제어하기 위한 LeRobot Teleoperator 패키지입니다.
+
+## Installation
+
+LeRobot 가상환경을 활성화합니다.
+
+```bash
+cd ~/rby1-lerobot
+source .venv/bin/activate
+```
+
+패키지 디렉터리에서 editable mode로 설치합니다.
+
+```bash
+cd ~/project/rby1-lerobot/lerobot-teleoperator-box
+python -m pip install -e .
+```
+
+설치 확인:
+
+```bash
+python -m pip show lerobot-teleoperator-box
+```
+
+Import 확인:
+
+```bash
+python -c "from lerobot_teleoperator_box import BoxVr, BoxVrConfig; print('IMPORT OK')"
+```
+
+## Record
+
+PC와 Meta Quest가 동일한 네트워크에 연결되어 있어야 합니다.
+
+* `teleop.local_ip`: LeRobot을 실행하는 PC의 IP
+* `teleop.meta_quest_ip`: Meta Quest의 IP
+* `teleop.local_port`: Quest pose 수신 포트
+* `teleop.meta_quest_port`: Quest handshake 포트
+
+**예시 :**
+
+```bash
+lerobot-record \
+  --robot.type=rby1 \
+  --robot.address=192.168.30.1:50051 \
+  --teleop.type=box_vr \
+  --teleop.id=rby1_box_vr \
+  --teleop.local_ip=192.168.0.245 \
+  --teleop.local_port=5005 \
+  --teleop.meta_quest_ip=192.168.0.206 \
+  --teleop.meta_quest_port=6000 \
+  --teleop.send_handshake=true \
+  --teleop.use_right_arm=true \
+  --teleop.use_left_arm=true \
+  --teleop.use_gripper=false \
+  --dataset.repo_id=rainbowrobotics/rby1_box_vr_demo \
+  --dataset.single_task="Control both arms of RB-Y1 using Meta Quest VR." \
+  --dataset.num_episodes=20 \
+  --dataset.fps=10 \
+  --dataset.push_to_hub=false
+```
+
+
+## Controls
+
+* Right grip: 오른팔 Cartesian pose 추종
+* Left grip: 왼팔 Cartesian pose 추종
+* Grip 해제: 마지막 EE target 유지
+* Trigger: gripper control 예정
+
+## Notes
+
+`teleop.local_ip`에는 다음과 같이 실제 네트워크 인터페이스의 IP를 입력해야 합니다.
+
+```bash
+hostname -I
+```
+
