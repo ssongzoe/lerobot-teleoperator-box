@@ -105,7 +105,7 @@ class VrReceiver:
         self._running = False
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
-        
+
     def connect(self) -> None:
         """Bind the UDP socket and start the receiver thread."""
 
@@ -175,21 +175,25 @@ class VrReceiver:
         )
 
     def receive(self) -> VrPacket | None:
-        """Return the latest valid packet.
+        """Wait until the first valid controller packet is available."""
 
-        Before the first valid packet arrives, this method waits for up to
-        10 seconds. After the first packet has arrived, it returns the latest
-        cached packet immediately without reading directly from the socket.
-        """
+        last_log_time = 0.0
 
-        if not self._first_packet_event.wait(timeout=10.0):
-            logger.warning(
-                "No valid VR packet was received within 10 seconds."
-            )
-            return None
+        while self._running:
+            if self._first_packet_event.wait(timeout=0.1):
+                with self._lock:
+                    return self._latest_packet
 
-        with self._lock:
-            return self._latest_packet
+            now = time.monotonic()
+
+            if now - last_log_time >= 2.0:
+                logger.info(
+                    "Waiting for VR controller data. "
+                    "Wake and move both Quest controllers."
+                )
+                last_log_time = now
+
+        return None
 
     def get_state(self) -> VrPacket | None:
         """Return the latest valid packet."""
@@ -264,11 +268,36 @@ class VrReceiver:
 
             try:
                 payload = json.loads(data.decode("utf-8"))
+
+            except Exception as exc:
+                logger.warning(
+                    "Failed to decode VR packet from %s: %s: %s",
+                    address,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+
+
+            hands = payload.get("hands", {})
+
+            # Quest may initially send head-only packets while the controllers
+            # are sleeping or not yet tracked. Ignore those packets and keep waiting.
+            if not isinstance(hands, dict) or not hands:
+                continue
+
+            # Current BoxVr configuration uses both arms, so wait until both
+            # controllers are available.
+            if "right" not in hands or "left" not in hands:
+                continue
+
+
+            try:
                 packet = parse_vr_packet(payload)
 
             except Exception as exc:
                 logger.warning(
-                    "Invalid VR packet from %s: %s: %s",
+                    "Invalid VR controller packet from %s: %s: %s",
                     address,
                     type(exc).__name__,
                     exc,
