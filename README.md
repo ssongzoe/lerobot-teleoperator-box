@@ -30,6 +30,27 @@ Import 확인:
 python -c "from lerobot_teleoperator_box import BoxVr, BoxVrConfig; print('IMPORT OK')"
 ```
 
+## Teleoperate
+
+Meta Quest VR로 RBY1을 직접 조작합니다.
+
+```
+lerobot-teleoperate \
+  --robot.type=rby1 \
+  --robot.address=192.168.30.1:50051 \
+  --teleop.type=box_vr \
+  --teleop.id=rby1_box_vr \
+  --teleop.local_ip=192.168.0.245 \
+  --teleop.local_port=5005 \
+  --teleop.meta_quest_ip=192.168.0.206 \
+  --teleop.meta_quest_port=6000 \
+  --teleop.send_handshake=true \
+  --teleop.use_right_arm=true \
+  --teleop.use_left_arm=true \
+  --teleop.use_gripper=false
+```
+
+
 ## Record
 
 PC와 Meta Quest가 동일한 네트워크에 연결되어 있어야 합니다.
