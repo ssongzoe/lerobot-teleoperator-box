@@ -38,11 +38,13 @@ Meta Quest VR로 RBY1을 직접 조작합니다.
 lerobot-teleoperate \
   --robot.type=rby1 \
   --robot.address=192.168.30.1:50051 \
+  --robot.use_right_arm=true \
+  --robot.use_left_arm=true \
+  --robot.use_gripper=false \
   --teleop.type=box_vr \
-  --teleop.id=rby1_box_vr \
-  --teleop.local_ip=192.168.0.245 \
+  --teleop.local_ip=192.168.0.132 \
   --teleop.local_port=5005 \
-  --teleop.meta_quest_ip=192.168.0.206 \
+  --teleop.meta_quest_ip=192.168.0.69 \
   --teleop.meta_quest_port=6000 \
   --teleop.send_handshake=true \
   --teleop.use_right_arm=true \
@@ -66,21 +68,22 @@ PC와 Meta Quest가 동일한 네트워크에 연결되어 있어야 합니다.
 lerobot-record \
   --robot.type=rby1 \
   --robot.address=192.168.30.1:50051 \
+  --robot.use_right_arm=true \
+  --robot.use_left_arm=true \
+  --robot.use_gripper=false \
   --teleop.type=box_vr \
-  --teleop.id=rby1_box_vr \
-  --teleop.local_ip=192.168.0.245 \
+  --teleop.local_ip=192.168.0.132 \
   --teleop.local_port=5005 \
-  --teleop.meta_quest_ip=192.168.0.206 \
+  --teleop.meta_quest_ip=192.168.0.69 \
   --teleop.meta_quest_port=6000 \
   --teleop.send_handshake=true \
   --teleop.use_right_arm=true \
   --teleop.use_left_arm=true \
   --teleop.use_gripper=false \
-  --dataset.repo_id=rainbowrobotics/rby1_box_vr_demo \
-  --dataset.single_task="Control both arms of RB-Y1 using Meta Quest VR." \
-  --dataset.num_episodes=20 \
-  --dataset.fps=10 \
-  --dataset.push_to_hub=false
+  --dataset.repo_id=<hf_username>/<dataset_name> \
+  --dataset.single_task="Teleoperate both arms of RB-Y1 using Meta Quest VR." \
+  --dataset.num_episodes=50 \
+  --dataset.fps=30
 ```
 
 
