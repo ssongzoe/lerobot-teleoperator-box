@@ -1,195 +1,228 @@
-"""UDP receiver for Meta Quest VR controller packets."""
+"""Thread-safe UDP receiver for Meta Quest controller data."""
 
 from __future__ import annotations
 
 import json
+import logging
 import socket
+import threading
 import time
-from typing import Any
 
-from .config_box_vr import BoxVrConfig
 from .vr_protocol import VrPacket, parse_vr_packet
+
+logger = logging.getLogger(__name__)
 
 
 class VrReceiver:
-    """Receive Meta Quest controller data over UDP.
+    """Continuously receive Meta Quest packets in a background thread.
 
-    This class is responsible only for network communication:
+    The receiver binds a UDP socket on ``0.0.0.0:local_port`` and stores the
+    latest valid :class:`VrPacket`.
 
-    - opening and closing the UDP socket
-    - receiving raw packets
-    - validating the packet sender
-    - parsing packets through ``vr_protocol.py``
-    - sending optional handshake messages
-
-    Coordinate conversion and robot target generation are intentionally handled
-    outside this class.
+    ``local_ip`` is not used for socket binding. It is advertised to the
+    Meta Quest through the handshake so that the Quest knows where to send
+    controller packets.
     """
 
-    def __init__(self, config: BoxVrConfig):
-        self.config = config
+    def __init__(
+        self,
+        *,
+        local_ip: str,
+        local_port: int,
+        meta_quest_ip: str,
+        meta_quest_port: int,
+        receive_timeout_s: float = 0.1,
+    ) -> None:
+        self.local_ip = local_ip
+        self.local_port = local_port
+        self.meta_quest_ip = meta_quest_ip
+        self.meta_quest_port = meta_quest_port
+        self.receive_timeout_s = receive_timeout_s
 
+        self._lock = threading.Lock()
+
+        self._latest_packet: VrPacket | None = None
+        self._last_packet_time: float | None = None
+
+        # Used to block only until the first valid VR packet arrives.
+        self._first_packet_event = threading.Event()
+
+        self._running = False
+        self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
-        self._is_connected = False
-
-        self._last_handshake_time = 0.0
-        self._last_sender_address: tuple[str, int] | None = None
-
-    @property
-    def is_connected(self) -> bool:
-        """Whether the UDP socket is currently open."""
-
-        return self._is_connected
-
-    @property
-    def last_sender_address(self) -> tuple[str, int] | None:
-        """Address of the most recent valid packet sender."""
-
-        return self._last_sender_address
 
     def connect(self) -> None:
-        """Create and bind the UDP socket."""
+        """Bind the UDP socket and start the receiver thread."""
 
-        if self.is_connected:
-            raise RuntimeError("VR receiver is already connected.")
+        if self._running:
+            return
 
-        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Reset cached state in case this object is reconnected.
+        with self._lock:
+            self._latest_packet = None
+            self._last_packet_time = None
+
+        self._first_packet_event.clear()
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         try:
-            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            udp_socket.settimeout(self.config.receive_timeout_s)
-            udp_socket.bind(
-                (
-                    self.config.local_ip,
-                    self.config.local_port,
-                )
-            )
+            # Accept packets arriving through any network interface.
+            sock.bind(("0.0.0.0", self.local_port))
+
+            # The timeout lets the thread periodically check self._running.
+            sock.settimeout(max(self.receive_timeout_s, 0.1))
+
         except Exception:
-            udp_socket.close()
+            sock.close()
             raise
 
-        self._socket = udp_socket
-        self._is_connected = True
+        self._socket = sock
+        self._running = True
 
-    def receive(self) -> VrPacket | None:
-        """Receive and parse one VR packet.
+        self._thread = threading.Thread(
+            target=self._receive_loop,
+            name="box-vr-receiver",
+            daemon=True,
+        )
+        self._thread.start()
 
-        Returns:
-            Parsed ``VrPacket`` when a valid packet is received.
-            ``None`` when the socket times out or the packet is invalid.
-        """
-
-        self._require_connected()
-
-        try:
-            payload, sender_address = self._socket.recvfrom(65535)
-        except socket.timeout:
-            return None
-        except BlockingIOError:
-            return None
-        except OSError as exc:
-            if not self.is_connected:
-                return None
-
-            raise RuntimeError(
-                f"Failed to receive VR UDP packet: {exc}"
-            ) from exc
-
-        if not payload:
-            return None
-
-        if not self._is_allowed_sender(sender_address):
-            return None
-
-        try:
-            packet = parse_vr_packet(payload)
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return None
-
-        self._last_sender_address = sender_address
-        return packet
+        logger.info(
+            "VR receiver listening on 0.0.0.0:%d",
+            self.local_port,
+        )
 
     def send_handshake(self) -> None:
-        """Send one handshake packet to the configured Meta Quest address."""
-
-        self._require_connected()
-
-        if not self.config.meta_quest_ip:
-            raise ValueError(
-                "meta_quest_ip must be configured when send_handshake is enabled."
-            )
-
-        payload = self._build_handshake_payload()
-
-        try:
-            self._socket.sendto(
-                payload,
-                (
-                    self.config.meta_quest_ip,
-                    self.config.meta_quest_port,
-                ),
-            )
-        except OSError as exc:
-            raise RuntimeError(
-                "Failed to send VR handshake to "
-                f"{self.config.meta_quest_ip}:"
-                f"{self.config.meta_quest_port}: {exc}"
-            ) from exc
-
-        self._last_handshake_time = time.monotonic()
-
-    def close(self) -> None:
-        """Close the UDP socket."""
-
-        if self._socket is not None:
-            try:
-                self._socket.close()
-            finally:
-                self._socket = None
-
-        self._is_connected = False
-        self._last_sender_address = None
-        self._last_handshake_time = 0.0
-
-    def _is_allowed_sender(
-        self,
-        sender_address: tuple[str, int],
-    ) -> bool:
-        """Validate the source IP of an incoming UDP packet."""
-
-        sender_ip, _ = sender_address
-
-        if not self.config.meta_quest_ip:
-            return True
-
-        return sender_ip == self.config.meta_quest_ip
-
-    def _build_handshake_payload(self) -> bytes:
-        """Tell the Quest app where to send controller packets."""
+        """Tell Meta Quest where it should send controller packets."""
 
         target_info = {
-            "ip": self.config.local_ip,
-            "port": self.config.local_port,
+            "ip": self.local_ip,
+            "port": self.local_port,
         }
 
-        return json.dumps(target_info).encode("utf-8")
+        message = json.dumps(target_info).encode("utf-8")
 
-    def _require_connected(self) -> None:
-        """Raise when a socket operation is attempted before connection."""
-
-        if not self.is_connected or self._socket is None:
-            raise RuntimeError(
-                "VR receiver is not connected. Call connect() first."
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(
+                message,
+                (
+                    self.meta_quest_ip,
+                    self.meta_quest_port,
+                ),
             )
 
-    def __enter__(self) -> VrReceiver:
-        self.connect()
-        return self
+        logger.info(
+            "VR handshake sent to %s:%d: %s",
+            self.meta_quest_ip,
+            self.meta_quest_port,
+            target_info,
+        )
 
-    def __exit__(
-        self,
-        exc_type: object,
-        exc_value: object,
-        traceback: object,
-    ) -> None:
-        self.close()
+    def receive(self) -> VrPacket | None:
+        """Return the latest valid packet.
+
+        Before the first valid packet arrives, this method waits for up to
+        10 seconds. After the first packet has arrived, it returns the latest
+        cached packet immediately without reading directly from the socket.
+        """
+
+        if not self._first_packet_event.wait(timeout=10.0):
+            logger.warning(
+                "No valid VR packet was received within 10 seconds."
+            )
+            return None
+
+        with self._lock:
+            return self._latest_packet
+
+    def get_state(self) -> VrPacket | None:
+        """Return the latest valid packet."""
+
+        return self.receive()
+
+    @property
+    def last_packet_age_s(self) -> float | None:
+        """Return elapsed seconds since the latest valid packet."""
+
+        with self._lock:
+            if self._last_packet_time is None:
+                return None
+
+            return time.monotonic() - self._last_packet_time
+
+    def close(self) -> None:
+        """Stop the receiver thread and release the UDP socket."""
+
+        self._running = False
+
+        # Wake receive() if it is waiting for the first packet.
+        self._first_packet_event.set()
+
+        sock = self._socket
+        self._socket = None
+
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        thread = self._thread
+        self._thread = None
+
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+        with self._lock:
+            self._latest_packet = None
+            self._last_packet_time = None
+
+        logger.info("VR receiver stopped.")
+
+    def _receive_loop(self) -> None:
+        """Continuously receive, decode and cache Meta Quest packets."""
+
+        while self._running:
+            sock = self._socket
+
+            if sock is None:
+                break
+
+            try:
+                data, address = sock.recvfrom(65535)
+
+            except socket.timeout:
+                continue
+
+            except OSError:
+                # Normally occurs when close() releases the socket.
+                if self._running:
+                    logger.exception("VR UDP socket error.")
+                break
+
+            except Exception:
+                logger.exception(
+                    "Unexpected error while receiving a VR UDP packet."
+                )
+                continue
+
+            try:
+                payload = json.loads(data.decode("utf-8"))
+                packet = parse_vr_packet(payload)
+
+            except Exception as exc:
+                logger.warning(
+                    "Invalid VR packet from %s: %s: %s",
+                    address,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+
+            with self._lock:
+                self._latest_packet = packet
+                self._last_packet_time = time.monotonic()
+
+            # Wake the first receive() call after a valid packet is cached.
+            self._first_packet_event.set()
