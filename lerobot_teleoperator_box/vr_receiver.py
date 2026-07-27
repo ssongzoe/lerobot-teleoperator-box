@@ -26,31 +26,86 @@ class VrReceiver:
 
     def __init__(
         self,
+        config=None,
         *,
-        local_ip: str,
-        local_port: int,
-        meta_quest_ip: str,
-        meta_quest_port: int,
-        receive_timeout_s: float = 0.1,
+        local_ip: str | None = None,
+        local_port: int | None = None,
+        meta_quest_ip: str | None = None,
+        meta_quest_port: int | None = None,
+        receive_timeout_s: float | None = None,
     ) -> None:
-        self.local_ip = local_ip
-        self.local_port = local_port
-        self.meta_quest_ip = meta_quest_ip
-        self.meta_quest_port = meta_quest_port
-        self.receive_timeout_s = receive_timeout_s
+        """Create the Meta Quest UDP receiver.
+
+        Supports both forms:
+
+            VrReceiver(config)
+
+        and:
+
+            VrReceiver(
+                local_ip="192.168.0.132",
+                local_port=5005,
+                meta_quest_ip="192.168.0.69",
+                meta_quest_port=6000,
+            )
+        """
+
+        if config is not None:
+            if local_ip is None:
+                local_ip = config.local_ip
+
+            if local_port is None:
+                local_port = config.local_port
+
+            if meta_quest_ip is None:
+                meta_quest_ip = config.meta_quest_ip
+
+            if meta_quest_port is None:
+                meta_quest_port = config.meta_quest_port
+
+            if receive_timeout_s is None:
+                receive_timeout_s = config.receive_timeout_s
+
+        missing = []
+
+        if local_ip is None:
+            missing.append("local_ip")
+
+        if local_port is None:
+            missing.append("local_port")
+
+        if meta_quest_ip is None:
+            missing.append("meta_quest_ip")
+
+        if meta_quest_port is None:
+            missing.append("meta_quest_port")
+
+        if missing:
+            raise ValueError(
+                "Missing VrReceiver configuration values: "
+                + ", ".join(missing)
+            )
+
+        if receive_timeout_s is None:
+            receive_timeout_s = 0.1
+
+        self.local_ip = str(local_ip)
+        self.local_port = int(local_port)
+        self.meta_quest_ip = str(meta_quest_ip)
+        self.meta_quest_port = int(meta_quest_port)
+        self.receive_timeout_s = float(receive_timeout_s)
 
         self._lock = threading.Lock()
 
         self._latest_packet: VrPacket | None = None
         self._last_packet_time: float | None = None
 
-        # Used to block only until the first valid VR packet arrives.
         self._first_packet_event = threading.Event()
 
         self._running = False
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
-
+        
     def connect(self) -> None:
         """Bind the UDP socket and start the receiver thread."""
 
