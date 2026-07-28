@@ -130,14 +130,15 @@ lerobot-teleoperate \
 
 ## Controls
 
-* **Right grip 유지:** 오른팔 Cartesian pose 추종
-* **Left grip 유지:** 왼팔 Cartesian pose 추종
-* **양쪽 grip 동시 유지:** HMD 움직임을 이용한 토르소 Cartesian pose 추종
-* **Grip 해제:** 해당 팔 또는 토르소의 마지막 Cartesian target 유지
-* **Right thumbstick 위·아래:** 모바일 베이스 전진·후진
-* **Right thumbstick 좌·우:** 모바일 베이스 좌·우 횡이동
-* **Left thumbstick 좌·우:** 모바일 베이스 회전
-* **Trigger:** gripper control 예정
+- **Right grip 유지:** 오른팔 Cartesian pose 추종
+- **Left grip 유지:** 왼팔 Cartesian pose 추종
+- **양쪽 grip 동시 유지:** 양팔 동시 추종
+- **Left Y 버튼 유지:** HMD 움직임을 이용한 토르소 Cartesian pose 추종
+- **Grip 또는 Y 버튼 해제:** 해당 구성요소의 마지막 Cartesian target 유지
+- **Right thumbstick 위·아래:** 모바일 베이스 전진·후진
+- **Right thumbstick 좌·우:** 모바일 베이스 좌·우 횡이동
+- **Left thumbstick 좌·우:** 모바일 베이스 회전
+- **Trigger:** gripper control 예정
 
 토르소는 양쪽 grip을 동시에 누르는 순간 현재 HMD pose와 현재 토르소 pose를 기준점으로 설정합니다.
 

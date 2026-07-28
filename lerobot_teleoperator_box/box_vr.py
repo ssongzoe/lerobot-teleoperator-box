@@ -462,6 +462,38 @@ class BoxVr(Teleoperator):
         self.update_robot_observation(self._latest_robot_observation)
 
 
+    def _torso_clutch_pressed(self, packet: Any) -> bool:
+        """Return whether the configured torso clutch input is held.
+
+        Quest button naming follows the packet convention:
+        left primary/secondary are X/Y and right primary/secondary are A/B.
+        ``both_grips`` preserves the previous behaviour for compatibility.
+        """
+
+        button = str(self.config.torso_clutch_button).strip().lower()
+
+        if button == "left_secondary":
+            return bool(packet.left.secondary_button)
+        if button == "left_primary":
+            return bool(packet.left.primary_button)
+        if button == "right_secondary":
+            return bool(packet.right.secondary_button)
+        if button == "right_primary":
+            return bool(packet.right.primary_button)
+        if button == "both_grips":
+            return bool(
+                packet.right.grip_pressed
+                and packet.left.grip_pressed
+            )
+
+        raise ValueError(
+            "Unsupported torso_clutch_button="
+            f"{self.config.torso_clutch_button!r}. Expected one of: "
+            "left_secondary, left_primary, right_secondary, "
+            "right_primary, both_grips."
+        )
+
+
     def get_action(self) -> RobotAction:
         """Receive one VR packet and produce a Cartesian robot action."""
 
@@ -492,10 +524,9 @@ class BoxVr(Teleoperator):
             torso_target = self.torso_state.update(
                 head_pose=head_pose,
                 robot_pose=torso_robot_pose,
-                both_grips_pressed=(
-                    packet.right.grip_pressed
-                    and packet.left.grip_pressed
-                ),
+                # TorsoControlState keeps its legacy argument name, but the
+                # clutch source is configurable. Default: left Y button.
+                both_grips_pressed=self._torso_clutch_pressed(packet),
                 position_scale=self.config.torso_position_scale,
                 rotation_scale=self.config.torso_rotation_scale,
             )

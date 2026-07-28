@@ -48,9 +48,20 @@ class BoxVrConfig(TeleoperatorConfig):
     use_right_arm: bool = True
     use_left_arm: bool = True
 
-    # Torso control follows the original RB-Y1 VR example: both grip buttons
-    # latch the HMD and measured torso pose; relative HMD rotation and vertical
-    # translation are applied while horizontal translation is ignored.
+    # Torso Cartesian clutch input. The default ``left_secondary`` is the
+    # Meta Quest left-controller Y button. The torso follows only while the
+    # selected input is held; releasing it keeps the last torso target.
+    #
+    # Supported values:
+    #   left_secondary  = Y (default)
+    #   left_primary    = X
+    #   right_secondary = B
+    #   right_primary   = A
+    #   both_grips      = legacy behaviour
+    torso_clutch_button: str = "left_secondary"
+
+    # Relative HMD rotation and vertical translation are applied to the torso
+    # anchor while horizontal HMD translation is ignored.
     torso_position_scale: float = 1.0
     torso_rotation_scale: float = 1.0
 
