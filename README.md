@@ -41,6 +41,7 @@ lerobot-teleoperate \
   --robot.use_right_arm=true \
   --robot.use_left_arm=true \
   --robot.use_gripper=false \
+  --robot.action_mode=ee \
   --teleop.type=box_vr \
   --teleop.local_ip=192.168.0.132 \
   --teleop.local_port=5005 \
@@ -49,7 +50,7 @@ lerobot-teleoperate \
   --teleop.send_handshake=true \
   --teleop.use_right_arm=true \
   --teleop.use_left_arm=true \
-  --teleop.use_gripper=false
+  --teleop.use_gripper=false 
 ```
 
 
@@ -71,6 +72,7 @@ lerobot-record \
   --robot.use_right_arm=true \
   --robot.use_left_arm=true \
   --robot.use_gripper=false \
+  --robot.action_mode=ee \
   --teleop.type=box_vr \
   --teleop.local_ip=192.168.0.132 \
   --teleop.local_port=5005 \
