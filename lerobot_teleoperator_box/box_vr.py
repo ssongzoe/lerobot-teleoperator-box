@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import logging
+import threading
+import time
+
 import numpy as np
 
 from lerobot.teleoperators.teleoperator import Teleoperator
@@ -11,15 +15,20 @@ from lerobot.types import RobotAction
 
 from .config_box_vr import BoxVrConfig
 from .constants import (
+    BASE_VEL_FEATURES,
+    TORSO_EE_FEATURES,
     LEFT_EE_FEATURES,
     LEFT_GRIPPER_FEATURE,
     RIGHT_EE_FEATURES,
     RIGHT_GRIPPER_FEATURE,
 )
-from .control_state import ArmControlState
-from .frame_transforms import controller_pose_to_rby1
+from .control_state import ArmControlState, TorsoControlState
+from .frame_transforms import controller_pose_to_rby1, vr_pose_to_rby1
 from .pose_utils import observation_to_pose, pose_to_action
 from .vr_receiver import VrReceiver
+
+
+logger = logging.getLogger(__name__)
 
 
 class BoxVr(Teleoperator):
@@ -45,12 +54,14 @@ class BoxVr(Teleoperator):
         self.config = config
         self.receiver = VrReceiver(config)
 
+        self.torso_state = TorsoControlState()
         self.right_state = ArmControlState(side="right")
         self.left_state = ArmControlState(side="left")
 
         self._is_connected = False
 
-        # Most recent measured robot end-effector poses.
+        # Most recent measured robot Cartesian poses.
+        self._torso_robot_pose: np.ndarray | None = None
         self._right_robot_pose: np.ndarray | None = None
         self._left_robot_pose: np.ndarray | None = None
 
@@ -58,16 +69,27 @@ class BoxVr(Teleoperator):
         self._last_action: RobotAction | None = None
         self._latest_robot_observation = None
 
+        # Smoothed mobile-base velocity state.
+        self._mobile_linear_velocity = np.zeros(2, dtype=np.float64)
+        self._mobile_angular_velocity = 0.0
 
-        # Read-only RB-Y1 connection used only for state reading and FK.
+
+        # Read-only RB-Y1 connection used only for asynchronous state
+        # subscription and FK. get_action() never performs an SDK RPC.
         self._robot = None
         self._model = None
         self._dyn_robot = None
         self._dyn_state = None
 
+        self._robot_pose_lock = threading.Lock()
+        self._first_robot_state_event = threading.Event()
+        self._last_robot_state_time: float | None = None
+        self._state_update_started = False
+
         self._idx_base = 0
-        self._idx_right_arm_6 = 1
-        self._idx_left_arm_6 = 2
+        self._idx_torso_5 = 1
+        self._idx_right_arm_6 = 2
+        self._idx_left_arm_6 = 3
 
 
     @property
@@ -76,11 +98,17 @@ class BoxVr(Teleoperator):
 
         features: dict[str, type] = {}
 
+        if self.config.use_torso:
+            features.update({name: float for name in TORSO_EE_FEATURES})
+
         if self.config.use_right_arm:
             features.update({name: float for name in RIGHT_EE_FEATURES})
 
         if self.config.use_left_arm:
             features.update({name: float for name in LEFT_EE_FEATURES})
+
+        if self.config.use_mobile_base:
+            features.update({name: float for name in BASE_VEL_FEATURES})
 
         if self.config.use_gripper:
             if self.config.use_right_arm:
@@ -129,7 +157,12 @@ class BoxVr(Teleoperator):
         self.configure()
 
     def _connect_robot_state_reader(self) -> None:
-        """Open a read-only RB-Y1 connection for current EE pose calculation."""
+        """Subscribe to RB-Y1 state updates and cache EE poses asynchronously.
+
+        The additional SDK connection is read-only. Unlike the previous
+        implementation, :meth:`get_action` does not call ``get_state()`` or run
+        FK synchronously; the SDK callback updates a small pose cache instead.
+        """
 
         try:
             import rby1_sdk as rby
@@ -137,6 +170,25 @@ class BoxVr(Teleoperator):
             raise ImportError(
                 "rby1_sdk is required for BoxVr robot state reading."
             ) from exc
+
+        update_rate_hz = float(self.config.robot_state_update_rate_hz)
+        if not np.isfinite(update_rate_hz) or update_rate_hz <= 0.0:
+            raise ValueError(
+                "robot_state_update_rate_hz must be a positive finite value."
+            )
+
+        initial_timeout_s = float(self.config.robot_state_initial_timeout_s)
+        if not np.isfinite(initial_timeout_s) or initial_timeout_s <= 0.0:
+            raise ValueError(
+                "robot_state_initial_timeout_s must be a positive finite value."
+            )
+
+        self._first_robot_state_event.clear()
+        with self._robot_pose_lock:
+            self._torso_robot_pose = None
+            self._right_robot_pose = None
+            self._left_robot_pose = None
+            self._last_robot_state_time = None
 
         self._robot = rby.create_robot(
             self.config.robot_address,
@@ -150,70 +202,188 @@ class BoxVr(Teleoperator):
                 f"{self.config.robot_address} for state reading."
             )
 
-        self._model = self._robot.model()
-        self._dyn_robot = self._robot.get_dynamics()
+        try:
+            self._model = self._robot.model()
+            self._dyn_robot = self._robot.get_dynamics()
 
-        self._dyn_state = self._dyn_robot.make_state(
-            [
-                "base",
-                "link_right_arm_6",
-                "link_left_arm_6",
-            ],
-            self._model.robot_joint_names,
+            self._dyn_state = self._dyn_robot.make_state(
+                [
+                    "base",
+                    "link_torso_5",
+                    "link_right_arm_6",
+                    "link_left_arm_6",
+                ],
+                self._model.robot_joint_names,
+            )
+
+            started = self._robot.start_state_update(
+                self._robot_state_callback,
+                update_rate_hz,
+            )
+            if started is False:
+                raise RuntimeError(
+                    "RB-Y1 start_state_update() returned False."
+                )
+            self._state_update_started = True
+
+            if not self._first_robot_state_event.wait(
+                timeout=initial_timeout_s
+            ):
+                raise TimeoutError(
+                    "Timed out waiting for the first RB-Y1 state update "
+                    f"after {initial_timeout_s:.2f}s."
+                )
+
+        except Exception:
+            self._disconnect_robot_state_reader()
+            raise
+
+        logger.info(
+            "RB-Y1 asynchronous state reader started at %.1f Hz.",
+            update_rate_hz,
         )
 
+    def _robot_state_callback(self, state: Any) -> None:
+        """Run FK from an SDK state callback and atomically cache EE poses."""
 
-    def _update_robot_poses_from_state(self) -> None:
-        """Read the current robot state and calculate both EE poses with FK."""
+        if self._dyn_robot is None or self._dyn_state is None:
+            return
 
-        if (
-            self._robot is None
-            or self._dyn_robot is None
-            or self._dyn_state is None
-        ):
+        try:
+            self._dyn_state.set_q(
+                np.asarray(state.position, dtype=np.float64).copy()
+            )
+            self._dyn_robot.compute_forward_kinematics(self._dyn_state)
+
+            torso_pose = None
+            right_pose = None
+            left_pose = None
+
+            if self.config.use_torso:
+                torso_pose = np.asarray(
+                    self._dyn_robot.compute_transformation(
+                        self._dyn_state,
+                        self._idx_base,
+                        self._idx_torso_5,
+                    ),
+                    dtype=np.float64,
+                ).copy()
+
+            if self.config.use_right_arm:
+                right_pose = np.asarray(
+                    self._dyn_robot.compute_transformation(
+                        self._dyn_state,
+                        self._idx_base,
+                        self._idx_right_arm_6,
+                    ),
+                    dtype=np.float64,
+                ).copy()
+
+            if self.config.use_left_arm:
+                left_pose = np.asarray(
+                    self._dyn_robot.compute_transformation(
+                        self._dyn_state,
+                        self._idx_base,
+                        self._idx_left_arm_6,
+                    ),
+                    dtype=np.float64,
+                ).copy()
+
+            with self._robot_pose_lock:
+                if torso_pose is not None:
+                    self._torso_robot_pose = torso_pose
+                if right_pose is not None:
+                    self._right_robot_pose = right_pose
+                if left_pose is not None:
+                    self._left_robot_pose = left_pose
+                self._last_robot_state_time = time.monotonic()
+
+            self._first_robot_state_event.set()
+
+        except Exception:
+            logger.exception(
+                "Failed to update cached RB-Y1 EE poses from state callback."
+            )
+
+    def _get_cached_robot_poses(
+        self,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """Return fresh copies of the latest callback-computed Cartesian poses."""
+
+        max_age_s = float(self.config.robot_state_max_age_s)
+        if not np.isfinite(max_age_s) or max_age_s <= 0.0:
+            raise ValueError(
+                "robot_state_max_age_s must be a positive finite value."
+            )
+
+        with self._robot_pose_lock:
+            torso_pose = (
+                None
+                if self._torso_robot_pose is None
+                else self._torso_robot_pose.copy()
+            )
+            right_pose = (
+                None
+                if self._right_robot_pose is None
+                else self._right_robot_pose.copy()
+            )
+            left_pose = (
+                None
+                if self._left_robot_pose is None
+                else self._left_robot_pose.copy()
+            )
+            last_update_time = self._last_robot_state_time
+
+        if last_update_time is None:
             raise RuntimeError(
-                "RB-Y1 state reader is not connected."
+                "No RB-Y1 state has been received by the asynchronous reader."
             )
 
-        state = self._robot.get_state()
-
-        self._dyn_state.set_q(
-            np.asarray(state.position, dtype=np.float64).copy()
-        )
-        self._dyn_robot.compute_forward_kinematics(self._dyn_state)
-
-        if self.config.use_right_arm:
-            self._right_robot_pose = np.asarray(
-                self._dyn_robot.compute_transformation(
-                    self._dyn_state,
-                    self._idx_base,
-                    self._idx_right_arm_6,
-                ),
-                dtype=np.float64,
+        age_s = time.monotonic() - last_update_time
+        if age_s > max_age_s:
+            raise RuntimeError(
+                "Cached RB-Y1 state is stale: "
+                f"age={age_s:.3f}s, limit={max_age_s:.3f}s."
             )
 
-        if self.config.use_left_arm:
-            self._left_robot_pose = np.asarray(
-                self._dyn_robot.compute_transformation(
-                    self._dyn_state,
-                    self._idx_base,
-                    self._idx_left_arm_6,
-                ),
-                dtype=np.float64,
-            )
-
+        return torso_pose, right_pose, left_pose
 
     def _disconnect_robot_state_reader(self) -> None:
-        """Close the read-only RB-Y1 connection."""
+        """Stop state subscription and close the read-only RB-Y1 handle."""
 
-        if self._robot is not None:
-            self._robot.disconnect()
+        robot = self._robot
+
+        if robot is not None and self._state_update_started:
+            stop_state_update = getattr(robot, "stop_state_update", None)
+            if callable(stop_state_update):
+                try:
+                    stop_state_update()
+                except Exception:
+                    logger.exception(
+                        "Failed to stop the RB-Y1 state update callback."
+                    )
+
+        self._state_update_started = False
+
+        if robot is not None:
+            try:
+                robot.disconnect()
+            except Exception:
+                logger.exception(
+                    "Failed to disconnect the RB-Y1 state reader."
+                )
 
         self._robot = None
         self._model = None
         self._dyn_robot = None
         self._dyn_state = None
 
+        self._first_robot_state_event.clear()
+        with self._robot_pose_lock:
+            self._torso_robot_pose = None
+            self._right_robot_pose = None
+            self._left_robot_pose = None
+            self._last_robot_state_time = None
 
 
 
@@ -226,11 +396,14 @@ class BoxVr(Teleoperator):
     def configure(self) -> None:
         """Reset transient clutch and target state."""
 
+        self.torso_state.reset()
         self.right_state.reset()
         self.left_state.reset()
 
-        self._right_robot_pose = None
-        self._left_robot_pose = None
+        # Robot-pose cache is owned by the asynchronous state callback and is
+        # intentionally preserved across transient teleoperator resets.
+        self._mobile_linear_velocity.fill(0.0)
+        self._mobile_angular_velocity = 0.0
         self._last_action = None
 
     def update_robot_observation(
@@ -246,20 +419,47 @@ class BoxVr(Teleoperator):
             observation: Observation returned by ``robot.get_observation()``.
         """
 
+        torso_pose = None
+        right_pose = None
+        left_pose = None
+
+        if self.config.use_torso:
+            torso_pose = observation_to_pose(
+                observation=observation,
+                prefix="torso_ee",
+            )
+
         if self.config.use_right_arm:
-            self._right_robot_pose = observation_to_pose(
+            right_pose = observation_to_pose(
                 observation=observation,
                 prefix="right_ee",
             )
 
         if self.config.use_left_arm:
-            self._left_robot_pose = observation_to_pose(
+            left_pose = observation_to_pose(
                 observation=observation,
                 prefix="left_ee",
             )
 
-    def set_robot_observation(self, observation) -> None:
+        if torso_pose is None and right_pose is None and left_pose is None:
+            return
+
+        with self._robot_pose_lock:
+            if torso_pose is not None:
+                self._torso_robot_pose = torso_pose.copy()
+            if right_pose is not None:
+                self._right_robot_pose = right_pose.copy()
+            if left_pose is not None:
+                self._left_robot_pose = left_pose.copy()
+            self._last_robot_state_time = time.monotonic()
+
+        self._first_robot_state_event.set()
+
+    def set_robot_observation(self, observation: dict[str, Any]) -> None:
+        """Accept an observation when a custom LeRobot loop provides one."""
+
         self._latest_robot_observation = dict(observation)
+        self.update_robot_observation(self._latest_robot_observation)
 
 
     def get_action(self) -> RobotAction:
@@ -275,10 +475,44 @@ class BoxVr(Teleoperator):
         if packet is None:
             return self._handle_missing_packet()
 
-        # 현재 joint state를 읽고 FK로 양팔 EE pose 계산
-        self._update_robot_poses_from_state()
+        # Copies only: no SDK RPC or FK runs on the LeRobot action thread.
+        torso_robot_pose, right_robot_pose, left_robot_pose = (
+            self._get_cached_robot_poses()
+        )
 
         action: RobotAction = {}
+
+        if self.config.use_torso:
+            head_pose = (
+                None
+                if packet.head is None
+                else vr_pose_to_rby1(packet.head.pose)
+            )
+
+            torso_target = self.torso_state.update(
+                head_pose=head_pose,
+                robot_pose=torso_robot_pose,
+                both_grips_pressed=(
+                    packet.right.grip_pressed
+                    and packet.left.grip_pressed
+                ),
+                position_scale=self.config.torso_position_scale,
+                rotation_scale=self.config.torso_rotation_scale,
+            )
+
+            if torso_target is None:
+                if torso_robot_pose is None:
+                    raise RuntimeError(
+                        "Current torso EE pose is unavailable."
+                    )
+                torso_target = torso_robot_pose.copy()
+
+            action.update(
+                pose_to_action(
+                    pose=torso_target,
+                    prefix="torso_ee",
+                )
+            )
 
         if self.config.use_right_arm:
             right_controller_pose = controller_pose_to_rby1(
@@ -288,7 +522,7 @@ class BoxVr(Teleoperator):
 
             right_target = self.right_state.update(
                 controller_pose=right_controller_pose,
-                robot_pose=self._right_robot_pose,
+                robot_pose=right_robot_pose,
                 clutch_pressed=packet.right.grip_pressed,
                 position_scale=self.config.position_scale,
                 rotation_scale=self.config.rotation_scale,
@@ -301,11 +535,11 @@ class BoxVr(Teleoperator):
 
             # 클러치 초기화 전에는 현재 로봇 EE pose 유지
             if right_target is None:
-                if self._right_robot_pose is None:
+                if right_robot_pose is None:
                     raise RuntimeError(
                         "Current right EE pose is unavailable."
                     )
-                right_target = self._right_robot_pose.copy()
+                right_target = right_robot_pose.copy()
 
             action.update(
                 pose_to_action(
@@ -327,7 +561,7 @@ class BoxVr(Teleoperator):
 
             left_target = self.left_state.update(
                 controller_pose=left_controller_pose,
-                robot_pose=self._left_robot_pose,
+                robot_pose=left_robot_pose,
                 clutch_pressed=packet.left.grip_pressed,
                 position_scale=self.config.position_scale,
                 rotation_scale=self.config.rotation_scale,
@@ -340,11 +574,11 @@ class BoxVr(Teleoperator):
 
             # 클러치 초기화 전에는 현재 로봇 EE pose 유지
             if left_target is None:
-                if self._left_robot_pose is None:
+                if left_robot_pose is None:
                     raise RuntimeError(
                         "Current left EE pose is unavailable."
                     )
-                left_target = self._left_robot_pose.copy()
+                left_target = left_robot_pose.copy()
 
             action.update(
                 pose_to_action(
@@ -358,10 +592,101 @@ class BoxVr(Teleoperator):
                     packet.left.trigger
                 )
 
+        if self.config.use_mobile_base:
+            action.update(self._update_mobile_base_action(packet))
+
         action = self._fill_missing_features(action)
         self._last_action = dict(action)
 
         return action
+
+
+    @staticmethod
+    def _apply_thumbstick_deadzone(
+        axis: tuple[float, float],
+        deadzone: float,
+    ) -> np.ndarray:
+        """Return a 2D thumbstick value with radial deadzone removal."""
+
+        value = np.asarray(axis, dtype=np.float64)
+        magnitude = float(np.linalg.norm(value))
+
+        if magnitude <= deadzone:
+            return np.zeros(2, dtype=np.float64)
+
+        if magnitude > 1.0:
+            value = value / magnitude
+            magnitude = 1.0
+
+        # Re-scale the remaining range so motion begins continuously at zero.
+        scaled_magnitude = (magnitude - deadzone) / max(1.0 - deadzone, 1e-6)
+        return value / max(magnitude, 1e-9) * scaled_magnitude
+
+    def _update_mobile_base_action(self, packet) -> RobotAction:
+        """Map Quest thumbsticks to smoothed RB-Y1 body-frame velocity.
+
+        Mapping retained from the original RB-Y1 VR example:
+
+        * right stick Y -> forward/backward ``x.vel``
+        * right stick X -> lateral ``-y.vel``
+        * left stick X  -> yaw ``-theta.vel``
+        """
+
+        deadzone = float(self.config.mobile_thumbstick_deadzone)
+        if not 0.0 <= deadzone < 1.0:
+            raise ValueError(
+                "mobile_thumbstick_deadzone must be in [0, 1)."
+            )
+
+        right_axis = self._apply_thumbstick_deadzone(
+            packet.right.thumbstick_axis,
+            deadzone,
+        )
+        left_axis = self._apply_thumbstick_deadzone(
+            packet.left.thumbstick_axis,
+            deadzone,
+        )
+
+        linear_input = np.array(
+            [right_axis[1], -right_axis[0]],
+            dtype=np.float64,
+        )
+        angular_input = float(-left_axis[0])
+
+        self._mobile_linear_velocity += (
+            self.config.mobile_linear_acceleration_gain * linear_input
+        )
+        self._mobile_angular_velocity += (
+            self.config.mobile_angular_acceleration_gain * angular_input
+        )
+
+        self._mobile_linear_velocity *= (
+            1.0 - self.config.mobile_linear_damping_gain
+        )
+        self._mobile_angular_velocity *= (
+            1.0 - self.config.mobile_angular_damping_gain
+        )
+
+        max_linear = float(self.config.mobile_max_linear_velocity_mps)
+        linear_speed = float(np.linalg.norm(self._mobile_linear_velocity))
+        if max_linear > 0.0 and linear_speed > max_linear:
+            self._mobile_linear_velocity *= max_linear / linear_speed
+
+        max_angular = float(self.config.mobile_max_angular_velocity_rps)
+        if max_angular > 0.0:
+            self._mobile_angular_velocity = float(
+                np.clip(
+                    self._mobile_angular_velocity,
+                    -max_angular,
+                    max_angular,
+                )
+            )
+
+        return {
+            "x.vel": float(self._mobile_linear_velocity[0]),
+            "y.vel": float(self._mobile_linear_velocity[1]),
+            "theta.vel": float(self._mobile_angular_velocity),
+        }
 
 
 
@@ -388,11 +713,12 @@ class BoxVr(Teleoperator):
         self._disconnect_robot_state_reader()
         self._is_connected = False
 
+        self.torso_state.reset()
         self.right_state.reset()
         self.left_state.reset()
 
-        self._right_robot_pose = None
-        self._left_robot_pose = None
+        self._mobile_linear_velocity.fill(0.0)
+        self._mobile_angular_velocity = 0.0
         self._last_action = None
 
     def _handle_missing_packet(self) -> RobotAction:

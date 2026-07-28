@@ -23,6 +23,12 @@ class BoxVrConfig(TeleoperatorConfig):
     robot_address: str = "192.168.30.1:50051"
     robot_model: str = "m"  # "a" | "m" | "ub"
 
+    # The read-only SDK handle subscribes to state updates on its own thread.
+    # get_action() only copies the cached FK poses and never calls get_state().
+    robot_state_update_rate_hz: float = 30.0
+    robot_state_initial_timeout_s: float = 3.0
+    robot_state_max_age_s: float = 0.5
+
     # UDP address on this computer.
     local_ip: str = "0.0.0.0"
     local_port: int = 5005
@@ -37,12 +43,38 @@ class BoxVrConfig(TeleoperatorConfig):
     # Maximum time to wait for a VR packet.
     receive_timeout_s: float = 0.1
 
-    # Arm selection.
+    # Cartesian component selection.
+    use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
 
+    # Torso control follows the original RB-Y1 VR example: both grip buttons
+    # latch the HMD and measured torso pose; relative HMD rotation and vertical
+    # translation are applied while horizontal translation is ignored.
+    torso_position_scale: float = 1.0
+    torso_rotation_scale: float = 1.0
+
     # Optional gripper control.
     use_gripper: bool = False
+
+    # Optional omnidirectional mobile-base control. The right thumbstick
+    # controls body-frame x/y velocity and the left thumbstick X axis
+    # controls yaw velocity, matching the original RB-Y1 VR example.
+    use_mobile_base: bool = False
+
+    # Ignore small thumbstick drift around the neutral position.
+    mobile_thumbstick_deadzone: float = 0.10
+
+    # Per-update acceleration and damping gains retained from the original
+    # RB-Y1 VR example. Final commands are clipped by the speed limits below.
+    mobile_linear_acceleration_gain: float = 0.30
+    mobile_angular_acceleration_gain: float = 0.70
+    mobile_linear_damping_gain: float = 0.30
+    mobile_angular_damping_gain: float = 0.50
+
+    # Final body-frame velocity limits.
+    mobile_max_linear_velocity_mps: float = 0.70
+    mobile_max_angular_velocity_rps: float = 0.70
 
     # Require the controller clutch button before updating a target.
     require_initialization_button: bool = True
