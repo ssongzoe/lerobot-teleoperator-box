@@ -34,6 +34,9 @@ python -c "from lerobot_teleoperator_box import BoxVr, BoxVrConfig; print('IMPOR
 
 Meta Quest VR로 RBY1을 직접 조작합니다.
 
+Meta Quest 앱 실행 후 양쪽 컨트롤러의 아무 버튼이나 한 번 눌러 컨트롤러 pose 스트리밍을 활성화합니다.
+
+
 ```
 lerobot-teleoperate \
   --robot.type=rby1 \

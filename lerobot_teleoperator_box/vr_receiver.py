@@ -189,7 +189,7 @@ class VrReceiver:
             if now - last_log_time >= 2.0:
                 logger.info(
                     "Waiting for VR controller data. "
-                    "Wake and move both Quest controllers."
+                    "Press any button on both Quest controllers."
                 )
                 last_log_time = now
 
@@ -270,12 +270,6 @@ class VrReceiver:
                 payload = json.loads(data.decode("utf-8"))
 
             except Exception as exc:
-                logger.warning(
-                    "Failed to decode VR packet from %s: %s: %s",
-                    address,
-                    type(exc).__name__,
-                    exc,
-                )
                 continue
 
 
