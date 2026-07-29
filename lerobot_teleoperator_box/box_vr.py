@@ -694,11 +694,11 @@ class BoxVr(Teleoperator):
     def _update_torso_preset_target(
         self,
         torso_robot_pose: np.ndarray | None,
-    ) -> tuple[np.ndarray | None, float | None, bool]:
-        """Return torso target, arm Z offset, and completion state.
+    ) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
+        """Return torso target, shared arm XYZ offset, and completion state.
 
-        The arm offset is measured from the torso EE Z at the transition start
-        to the interpolated torso target Z in the robot base frame.
+        Both arm targets receive the same base-frame translation as the torso
+        EE while their orientations remain unchanged.
         """
 
         # Preserve the drift fix: initialize the torso hold target exactly once
@@ -735,18 +735,21 @@ class BoxVr(Teleoperator):
         )
         self.torso_state.set_hold_target(target)
 
-        arm_z_follow_ratio = float(
-            self.config.torso_preset_arm_z_follow_ratio
+        arm_translation_follow_ratio = float(
+            self.config.torso_preset_arm_translation_follow_ratio
         )
-        if not np.isfinite(arm_z_follow_ratio) or arm_z_follow_ratio < 0.0:
+        if (
+            not np.isfinite(arm_translation_follow_ratio)
+            or arm_translation_follow_ratio < 0.0
+        ):
             raise ValueError(
-                "torso_preset_arm_z_follow_ratio must be a finite, "
+                "torso_preset_arm_translation_follow_ratio must be a finite, "
                 "non-negative value."
             )
 
-        arm_delta_z = (
-            target[2, 3] - self._torso_transition_start_pose[2, 3]
-        ) * arm_z_follow_ratio
+        arm_translation_delta = (
+            target[:3, 3] - self._torso_transition_start_pose[:3, 3]
+        ) * arm_translation_follow_ratio
 
         transition_finished = progress >= 1.0
         if transition_finished:
@@ -754,7 +757,7 @@ class BoxVr(Teleoperator):
             self._torso_transition_start_pose = None
             self._torso_transition_target_pose = None
 
-        return target, float(arm_delta_z), transition_finished
+        return target, arm_translation_delta.copy(), transition_finished
 
 
     def _arm_clutch_allowed(
@@ -782,14 +785,19 @@ class BoxVr(Teleoperator):
         raise ValueError(f"Unsupported arm side: {side!r}.")
 
     @staticmethod
-    def _apply_arm_z_offset(
+    def _apply_arm_translation_offset(
         start_pose: np.ndarray,
-        delta_z: float,
+        translation_delta: np.ndarray,
     ) -> np.ndarray:
-        """Translate one arm target only along base-frame Z."""
+        """Translate one arm target in base-frame XYZ without rotating it."""
+
+        translation_delta = np.asarray(
+            translation_delta,
+            dtype=np.float64,
+        ).reshape(3)
 
         target = start_pose.copy()
-        target[2, 3] += float(delta_z)
+        target[:3, 3] += translation_delta
         return target
 
 
@@ -812,7 +820,7 @@ class BoxVr(Teleoperator):
         )
 
         action: RobotAction = {}
-        torso_arm_delta_z: float | None = None
+        torso_arm_translation_delta: np.ndarray | None = None
         torso_transition_finished = False
 
         if self.config.use_torso:
@@ -829,7 +837,7 @@ class BoxVr(Teleoperator):
 
             (
                 torso_target,
-                torso_arm_delta_z,
+                torso_arm_translation_delta,
                 torso_transition_finished,
             ) = self._update_torso_preset_target(torso_robot_pose)
 
@@ -847,14 +855,14 @@ class BoxVr(Teleoperator):
 
         if self.config.use_right_arm:
             if (
-                torso_arm_delta_z is not None
+                torso_arm_translation_delta is not None
                 and self._torso_transition_right_arm_start_pose is not None
             ):
-                # Preserve the bimanual grasp: only follow the torso height
-                # change. X/Y and the complete arm orientation remain fixed.
-                right_target = self._apply_arm_z_offset(
+                # Preserve the bimanual grasp: both hands receive exactly the
+                # same base-frame XYZ translation. Arm orientations stay fixed.
+                right_target = self._apply_arm_translation_offset(
                     self._torso_transition_right_arm_start_pose,
-                    torso_arm_delta_z,
+                    torso_arm_translation_delta,
                 )
                 self.right_state.set_hold_target(right_target)
             else:
@@ -901,14 +909,14 @@ class BoxVr(Teleoperator):
 
         if self.config.use_left_arm:
             if (
-                torso_arm_delta_z is not None
+                torso_arm_translation_delta is not None
                 and self._torso_transition_left_arm_start_pose is not None
             ):
-                # Apply exactly the same base-frame Z translation as the
+                # Apply exactly the same base-frame XYZ translation as the
                 # right arm so the relative bimanual object pose is preserved.
-                left_target = self._apply_arm_z_offset(
+                left_target = self._apply_arm_translation_offset(
                     self._torso_transition_left_arm_start_pose,
-                    torso_arm_delta_z,
+                    torso_arm_translation_delta,
                 )
                 self.left_state.set_hold_target(left_target)
             else:

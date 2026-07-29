@@ -56,11 +56,10 @@ class BoxVrConfig(TeleoperatorConfig):
     torso_pose_b_deg: tuple[float, ...] = (0.0, 82.0, -91.0, 30.0, -2.0, 0.0)
     torso_preset_duration_s: float = 1.5
 
-    # During a torso preset transition, move both arm Cartesian targets only
-    # along base-frame Z by the same torso EE height change. X/Y and the arm
-    # orientations remain unchanged so a bimanually held object's pose is
-    # preserved apart from the shared vertical translation.
-    torso_preset_arm_z_follow_ratio: float = 0.8
+    # During a torso preset transition, translate both arm Cartesian targets
+    # by the same base-frame XYZ displacement as the torso EE. Arm orientations
+    # remain unchanged, so the relative pose between both hands is preserved.
+    torso_preset_arm_translation_follow_ratio: float = 1.0
 
     # Optional gripper control.
     use_gripper: bool = False
@@ -79,8 +78,7 @@ class BoxVrConfig(TeleoperatorConfig):
     mobile_acceleration_time_s: float = 0.50
     mobile_deceleration_time_s: float = 0.50
 
-    # Final body-frame velocity limits. These defaults are 70% of the previous
-    # 0.70 m/s and 0.70 rad/s limits.
+    # Tuned body-frame velocity limits for comfortable whole-body teleoperation.
     mobile_max_linear_velocity_mps: float = 0.34
     mobile_max_angular_velocity_rps: float = 0.39
 
