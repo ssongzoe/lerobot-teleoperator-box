@@ -105,6 +105,11 @@ class BoxVr(Teleoperator):
         self._init_left_arm_pose: np.ndarray | None = None
 
         self._init_pose_button_was_pressed = False
+        # Init poses must be captured only after the main LeRobot robot has
+        # completed its own connection/init sequence. Capturing them in
+        # Teleoperator.connect() can store a stale pre-init pose and make the
+        # first Cartesian action pull the robot back for one frame.
+        self._startup_pose_initialized = False
         self._init_transition_start_time: float | None = None
         self._init_transition_torso_start_pose: np.ndarray | None = None
         self._init_transition_right_start_pose: np.ndarray | None = None
@@ -541,13 +546,20 @@ class BoxVr(Teleoperator):
         self._left_grip_blocked_until_release = False
 
         self._init_pose_button_was_pressed = False
+        self._startup_pose_initialized = False
         self._init_transition_start_time = None
         self._init_transition_torso_start_pose = None
         self._init_transition_right_start_pose = None
         self._init_transition_left_start_pose = None
 
+        # Do not capture Cartesian init targets here. Depending on LeRobot's
+        # connection order, the teleoperator can be configured before the main
+        # robot finishes moving to its startup pose. Capture lazily from the
+        # latest measured pose on the first action cycle instead.
+        self._init_torso_pose = None
+        self._init_right_arm_pose = None
+        self._init_left_arm_pose = None
         self._last_action = None
-        self._capture_init_poses()
 
     def _capture_init_poses(self) -> None:
         """Capture and hold the Cartesian pose present at teleop startup."""
@@ -1053,6 +1065,73 @@ class BoxVr(Teleoperator):
 
         action: RobotAction = {}
 
+        # Initialize all hold targets from the live pose only after the main
+        # robot and teleoperator are both connected. The first action therefore
+        # matches the robot's current measured pose exactly instead of replaying
+        # a pose captured earlier during Teleoperator.connect().
+        if not self._startup_pose_initialized:
+            self._capture_init_poses()
+            self._startup_pose_initialized = True
+
+            # Prime edge detectors from the first packet. A button that happens
+            # to be held while the stream starts must not trigger a transition.
+            self._init_pose_button_was_pressed = self._init_pose_pressed(packet)
+            self._torso_toggle_was_pressed = (
+                self._torso_toggle_pressed(packet)
+                if self.config.use_torso
+                else False
+            )
+
+            if self.config.use_torso:
+                if self._init_torso_pose is None:
+                    raise RuntimeError("Startup torso pose was not captured.")
+                action.update(
+                    pose_to_action(
+                        pose=self._init_torso_pose,
+                        prefix="torso_ee",
+                    )
+                )
+
+            if self.config.use_right_arm:
+                if self._init_right_arm_pose is None:
+                    raise RuntimeError("Startup right-arm pose was not captured.")
+                action.update(
+                    pose_to_action(
+                        pose=self._init_right_arm_pose,
+                        prefix="right_ee",
+                    )
+                )
+                if self.config.use_gripper:
+                    action[RIGHT_GRIPPER_FEATURE] = float(packet.right.trigger)
+
+            if self.config.use_left_arm:
+                if self._init_left_arm_pose is None:
+                    raise RuntimeError("Startup left-arm pose was not captured.")
+                action.update(
+                    pose_to_action(
+                        pose=self._init_left_arm_pose,
+                        prefix="left_ee",
+                    )
+                )
+                if self.config.use_gripper:
+                    action[LEFT_GRIPPER_FEATURE] = float(packet.left.trigger)
+
+            if self.config.use_mobile_base:
+                action.update(
+                    {
+                        "x.vel": 0.0,
+                        "y.vel": 0.0,
+                        "theta.vel": 0.0,
+                    }
+                )
+
+            action = self._fill_missing_features(action)
+            self._last_action = dict(action)
+            logger.info(
+                "Initialized Cartesian hold targets from the first live action cycle."
+            )
+            return action
+
         init_pressed = self._init_pose_pressed(packet)
         init_rising_edge = (
             self.config.enable_init_pose_button
@@ -1483,6 +1562,10 @@ class BoxVr(Teleoperator):
         self._torso_transition_left_arm_start_pose = None
         self._right_grip_blocked_until_release = False
         self._left_grip_blocked_until_release = False
+        self._startup_pose_initialized = False
+        self._init_torso_pose = None
+        self._init_right_arm_pose = None
+        self._init_left_arm_pose = None
         self._last_action = None
 
     def _handle_missing_packet(self) -> RobotAction:
