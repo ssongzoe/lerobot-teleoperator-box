@@ -48,22 +48,13 @@ class BoxVrConfig(TeleoperatorConfig):
     use_right_arm: bool = True
     use_left_arm: bool = True
 
-    # Torso Cartesian clutch input. The default ``left_secondary`` is the
-    # Meta Quest left-controller Y button. The torso follows only while the
-    # selected input is held; releasing it keeps the last torso target.
-    #
-    # Supported values:
-    #   left_secondary  = Y (default)
-    #   left_primary    = X
-    #   right_secondary = B
-    #   right_primary   = A
-    #   both_grips      = legacy behaviour
-    torso_clutch_button: str = "left_secondary"
-
-    # Relative HMD rotation and vertical translation are applied to the torso
-    # anchor while horizontal HMD translation is ignored.
-    torso_position_scale: float = 1.0
-    torso_rotation_scale: float = 1.0
+    # Fixed torso-pose toggle. By default, each rising edge of the Meta Quest
+    # left-controller Y button alternates A -> B -> A. Values are the six
+    # torso joint angles in degrees and are converted to Cartesian targets by FK.
+    torso_toggle_button: str = "left_secondary"
+    torso_pose_a_deg: tuple[float, ...] = (0.0, 55.0, -60.0, 7.0, 0.0, 0.0)
+    torso_pose_b_deg: tuple[float, ...] = (0.0, 82.0, -91.0, 30.0, -2.0, 0.0)
+    torso_preset_duration_s: float = 1.5
 
     # Optional gripper control.
     use_gripper: bool = False

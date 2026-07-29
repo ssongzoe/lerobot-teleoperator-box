@@ -440,6 +440,19 @@ class TorsoControlState:
         self._torso_start_pose = None
         self._last_target_pose = None
 
+    def set_hold_target(self, pose: np.ndarray) -> np.ndarray:
+        """Replace the torso hold target and clear HMD-follow anchors."""
+
+        pose = ArmControlState._validate_pose(
+            pose,
+            name="pose",
+        )
+        self._is_following = False
+        self._head_start_pose = None
+        self._torso_start_pose = None
+        self._last_target_pose = pose.copy()
+        return self.last_target_pose
+
     def update(
         self,
         *,

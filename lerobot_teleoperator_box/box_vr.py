@@ -9,6 +9,7 @@ import threading
 import time
 
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.types import RobotAction
@@ -23,7 +24,7 @@ from .constants import (
     RIGHT_GRIPPER_FEATURE,
 )
 from .control_state import ArmControlState, TorsoControlState
-from .frame_transforms import controller_pose_to_rby1, vr_pose_to_rby1
+from .frame_transforms import controller_pose_to_rby1
 from .pose_utils import observation_to_pose, pose_to_action
 from .vr_receiver import VrReceiver
 
@@ -74,6 +75,23 @@ class BoxVr(Teleoperator):
         self._mobile_angular_velocity = 0.0
         self._last_mobile_update_time: float | None = None
 
+        # Fixed torso-pose toggle state. The configured joint-space presets
+        # are converted once to Cartesian targets through RB-Y1 FK.
+        self._torso_pose_a_rad = self._validate_torso_joint_pose(
+            self.config.torso_pose_a_deg,
+            name="torso_pose_a_deg",
+        )
+        self._torso_pose_b_rad = self._validate_torso_joint_pose(
+            self.config.torso_pose_b_deg,
+            name="torso_pose_b_deg",
+        )
+        self._torso_preset_poses: tuple[np.ndarray, np.ndarray] | None = None
+        self._torso_next_preset_index = 0  # First Y press selects pose A.
+        self._torso_toggle_was_pressed = False
+        self._torso_transition_start_time: float | None = None
+        self._torso_transition_start_pose: np.ndarray | None = None
+        self._torso_transition_target_pose: np.ndarray | None = None
+
 
         # Read-only RB-Y1 connection used only for asynchronous state
         # subscription and FK. get_action() never performs an SDK RPC.
@@ -92,6 +110,24 @@ class BoxVr(Teleoperator):
         self._idx_right_arm_6 = 2
         self._idx_left_arm_6 = 3
 
+
+    @staticmethod
+    def _validate_torso_joint_pose(
+        pose_deg: tuple[float, ...] | list[float],
+        *,
+        name: str,
+    ) -> np.ndarray:
+        """Validate one six-joint torso preset and convert degrees to radians."""
+
+        pose = np.asarray(pose_deg, dtype=np.float64).reshape(-1)
+        if pose.shape != (6,):
+            raise ValueError(
+                f"{name} must contain exactly 6 joint angles, "
+                f"received shape {pose.shape}."
+            )
+        if not np.all(np.isfinite(pose)):
+            raise ValueError(f"{name} contains non-finite values.")
+        return np.deg2rad(pose)
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -251,9 +287,12 @@ class BoxVr(Teleoperator):
             return
 
         try:
-            self._dyn_state.set_q(
-                np.asarray(state.position, dtype=np.float64).copy()
-            )
+            current_q = np.asarray(
+                state.position,
+                dtype=np.float64,
+            ).copy()
+
+            self._dyn_state.set_q(current_q)
             self._dyn_robot.compute_forward_kinematics(self._dyn_state)
 
             torso_pose = None
@@ -290,6 +329,15 @@ class BoxVr(Teleoperator):
                     dtype=np.float64,
                 ).copy()
 
+            if self.config.use_torso and self._torso_preset_poses is None:
+                self._torso_preset_poses = self._compute_torso_preset_poses(
+                    current_q
+                )
+
+                # Restore the live state after temporary preset FK.
+                self._dyn_state.set_q(current_q)
+                self._dyn_robot.compute_forward_kinematics(self._dyn_state)
+
             with self._robot_pose_lock:
                 if torso_pose is not None:
                     self._torso_robot_pose = torso_pose
@@ -305,6 +353,56 @@ class BoxVr(Teleoperator):
             logger.exception(
                 "Failed to update cached RB-Y1 EE poses from state callback."
             )
+
+    def _compute_torso_preset_poses(
+        self,
+        current_q: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Convert the configured six-joint torso presets to EE poses."""
+
+        if self._model is None or self._dyn_robot is None or self._dyn_state is None:
+            raise RuntimeError("RB-Y1 dynamics are not initialized.")
+
+        joint_names = [str(name) for name in self._model.robot_joint_names]
+        torso_indices = [
+            index
+            for index, name in enumerate(joint_names)
+            if "torso" in name.lower()
+        ]
+
+        if len(torso_indices) != 6:
+            raise RuntimeError(
+                "Expected exactly 6 torso joints in model.robot_joint_names, "
+                f"found {len(torso_indices)}: "
+                f"{[joint_names[index] for index in torso_indices]}"
+            )
+
+        poses: list[np.ndarray] = []
+        for torso_q in (self._torso_pose_a_rad, self._torso_pose_b_rad):
+            preset_q = current_q.copy()
+            preset_q[torso_indices] = torso_q
+
+            self._dyn_state.set_q(preset_q)
+            self._dyn_robot.compute_forward_kinematics(self._dyn_state)
+
+            poses.append(
+                np.asarray(
+                    self._dyn_robot.compute_transformation(
+                        self._dyn_state,
+                        self._idx_base,
+                        self._idx_torso_5,
+                    ),
+                    dtype=np.float64,
+                ).copy()
+            )
+
+        logger.info(
+            "Prepared torso preset FK targets: A=%s deg, B=%s deg.",
+            list(self.config.torso_pose_a_deg),
+            list(self.config.torso_pose_b_deg),
+        )
+
+        return poses[0], poses[1]
 
     def _get_cached_robot_poses(
         self,
@@ -406,6 +504,13 @@ class BoxVr(Teleoperator):
         self._mobile_linear_velocity.fill(0.0)
         self._mobile_angular_velocity = 0.0
         self._last_mobile_update_time = None
+
+        self._torso_next_preset_index = 0
+        self._torso_toggle_was_pressed = False
+        self._torso_transition_start_time = None
+        self._torso_transition_start_pose = None
+        self._torso_transition_target_pose = None
+
         self._last_action = None
 
     def update_robot_observation(
@@ -464,15 +569,10 @@ class BoxVr(Teleoperator):
         self.update_robot_observation(self._latest_robot_observation)
 
 
-    def _torso_clutch_pressed(self, packet: Any) -> bool:
-        """Return whether the configured torso clutch input is held.
+    def _torso_toggle_pressed(self, packet: Any) -> bool:
+        """Return the configured torso preset-toggle button state."""
 
-        Quest button naming follows the packet convention:
-        left primary/secondary are X/Y and right primary/secondary are A/B.
-        ``both_grips`` preserves the previous behaviour for compatibility.
-        """
-
-        button = str(self.config.torso_clutch_button).strip().lower()
+        button = str(self.config.torso_toggle_button).strip().lower()
 
         if button == "left_secondary":
             return bool(packet.left.secondary_button)
@@ -482,18 +582,115 @@ class BoxVr(Teleoperator):
             return bool(packet.right.secondary_button)
         if button == "right_primary":
             return bool(packet.right.primary_button)
-        if button == "both_grips":
-            return bool(
-                packet.right.grip_pressed
-                and packet.left.grip_pressed
-            )
 
         raise ValueError(
-            "Unsupported torso_clutch_button="
-            f"{self.config.torso_clutch_button!r}. Expected one of: "
-            "left_secondary, left_primary, right_secondary, "
-            "right_primary, both_grips."
+            "Unsupported torso_toggle_button="
+            f"{self.config.torso_toggle_button!r}. Expected one of: "
+            "left_secondary, left_primary, right_secondary, right_primary."
         )
+
+    def _start_torso_preset_transition(
+        self,
+        torso_robot_pose: np.ndarray | None,
+    ) -> None:
+        """Start a smooth transition to the next fixed torso preset."""
+
+        if self._torso_preset_poses is None:
+            raise RuntimeError(
+                "Torso preset FK targets are not initialized yet."
+            )
+
+        start_pose = self.torso_state.last_target_pose
+        if start_pose is None:
+            if torso_robot_pose is None:
+                raise RuntimeError(
+                    "Current torso EE pose is unavailable for preset transition."
+                )
+            start_pose = torso_robot_pose.copy()
+
+        target_index = self._torso_next_preset_index
+        self._torso_next_preset_index = 1 - target_index
+
+        self._torso_transition_start_time = time.monotonic()
+        self._torso_transition_start_pose = start_pose.copy()
+        self._torso_transition_target_pose = (
+            self._torso_preset_poses[target_index].copy()
+        )
+
+        logger.info(
+            "Torso preset toggle: moving to pose %s.",
+            "A" if target_index == 0 else "B",
+        )
+
+    @staticmethod
+    def _interpolate_pose(
+        start_pose: np.ndarray,
+        target_pose: np.ndarray,
+        alpha: float,
+    ) -> np.ndarray:
+        """Interpolate translation and orientation between two poses."""
+
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        pose = np.eye(4, dtype=np.float64)
+        pose[:3, 3] = (
+            start_pose[:3, 3]
+            + (target_pose[:3, 3] - start_pose[:3, 3]) * alpha
+        )
+
+        relative_rotation = start_pose[:3, :3].T @ target_pose[:3, :3]
+        relative_rotvec = R.from_matrix(relative_rotation).as_rotvec()
+        pose[:3, :3] = (
+            start_pose[:3, :3]
+            @ R.from_rotvec(relative_rotvec * alpha).as_matrix()
+        )
+        return pose
+
+    def _update_torso_preset_target(
+        self,
+        torso_robot_pose: np.ndarray | None,
+    ) -> np.ndarray | None:
+        """Return the current fixed-preset transition or hold target."""
+
+        # Preserve the drift fix: initialize the torso hold target exactly once
+        # from the measured pose, rather than adopting the measured pose every frame.
+        hold_target = self.torso_state.update(
+            head_pose=None,
+            robot_pose=torso_robot_pose,
+            both_grips_pressed=False,
+            position_scale=1.0,
+            rotation_scale=1.0,
+        )
+
+        if (
+            self._torso_transition_start_time is None
+            or self._torso_transition_start_pose is None
+            or self._torso_transition_target_pose is None
+        ):
+            return hold_target
+
+        duration_s = float(self.config.torso_preset_duration_s)
+        if not np.isfinite(duration_s) or duration_s <= 0.0:
+            raise ValueError(
+                "torso_preset_duration_s must be a positive finite value."
+            )
+
+        progress = (time.monotonic() - self._torso_transition_start_time) / duration_s
+        progress = float(np.clip(progress, 0.0, 1.0))
+        smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+
+        target = self._interpolate_pose(
+            self._torso_transition_start_pose,
+            self._torso_transition_target_pose,
+            smooth_progress,
+        )
+        self.torso_state.set_hold_target(target)
+
+        if progress >= 1.0:
+            self._torso_transition_start_time = None
+            self._torso_transition_start_pose = None
+            self._torso_transition_target_pose = None
+
+        return target
 
 
     def get_action(self) -> RobotAction:
@@ -517,28 +714,21 @@ class BoxVr(Teleoperator):
         action: RobotAction = {}
 
         if self.config.use_torso:
-            head_pose = (
-                None
-                if packet.head is None
-                else vr_pose_to_rby1(packet.head.pose)
-            )
+            toggle_pressed = self._torso_toggle_pressed(packet)
 
-            torso_target = self.torso_state.update(
-                head_pose=head_pose,
-                robot_pose=torso_robot_pose,
-                # TorsoControlState keeps its legacy argument name, but the
-                # clutch source is configurable. Default: left Y button.
-                both_grips_pressed=self._torso_clutch_pressed(packet),
-                position_scale=self.config.torso_position_scale,
-                rotation_scale=self.config.torso_rotation_scale,
+            if toggle_pressed and not self._torso_toggle_was_pressed:
+                self._start_torso_preset_transition(torso_robot_pose)
+
+            self._torso_toggle_was_pressed = toggle_pressed
+
+            torso_target = self._update_torso_preset_target(
+                torso_robot_pose
             )
 
             if torso_target is None:
-                if torso_robot_pose is None:
-                    raise RuntimeError(
-                        "Current torso EE pose is unavailable."
-                    )
-                torso_target = torso_robot_pose.copy()
+                raise RuntimeError(
+                    "Current torso EE pose is unavailable."
+                )
 
             action.update(
                 pose_to_action(
@@ -817,6 +1007,10 @@ class BoxVr(Teleoperator):
         self._mobile_linear_velocity.fill(0.0)
         self._mobile_angular_velocity = 0.0
         self._last_mobile_update_time = None
+        self._torso_preset_poses = None
+        self._torso_transition_start_time = None
+        self._torso_transition_start_pose = None
+        self._torso_transition_target_pose = None
         self._last_action = None
 
     def _handle_missing_packet(self) -> RobotAction:
