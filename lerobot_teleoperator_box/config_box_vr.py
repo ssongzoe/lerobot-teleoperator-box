@@ -65,12 +65,6 @@ class BoxVrConfig(TeleoperatorConfig):
     torso_position_scale: float = 1.0
     torso_rotation_scale: float = 1.0
 
-    # Right-controller A button returns torso and both arms to the Cartesian
-    # pose measured when this teleoperator connected. The robot package normally
-    # moves to its ready pose first, so this becomes the session init pose.
-    enable_init_pose_button: bool = True
-    init_pose_duration_s: float = 2.0
-
     # Optional gripper control.
     use_gripper: bool = False
 
@@ -90,8 +84,8 @@ class BoxVrConfig(TeleoperatorConfig):
 
     # Final body-frame velocity limits. These defaults are 70% of the previous
     # 0.70 m/s and 0.70 rad/s limits.
-    mobile_max_linear_velocity_mps: float = 0.40
-    mobile_max_angular_velocity_rps: float = 0.40
+    mobile_max_linear_velocity_mps: float = 0.49
+    mobile_max_angular_velocity_rps: float = 0.49
 
     # Cap the elapsed time used by one velocity update. This prevents a single
     # delayed control-loop iteration from causing a large velocity jump.
