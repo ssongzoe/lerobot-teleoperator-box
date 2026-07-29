@@ -9,6 +9,7 @@ import threading
 import time
 
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.types import RobotAction
@@ -73,6 +74,18 @@ class BoxVr(Teleoperator):
         self._mobile_linear_velocity = np.zeros(2, dtype=np.float64)
         self._mobile_angular_velocity = 0.0
         self._last_mobile_update_time: float | None = None
+
+        # Cartesian init pose captured once when the teleoperator connects.
+        self._init_torso_pose: np.ndarray | None = None
+        self._init_right_pose: np.ndarray | None = None
+        self._init_left_pose: np.ndarray | None = None
+
+        # Right-A edge detection and active init-pose interpolation state.
+        self._right_a_was_pressed = False
+        self._init_motion_start_time: float | None = None
+        self._init_motion_start_torso: np.ndarray | None = None
+        self._init_motion_start_right: np.ndarray | None = None
+        self._init_motion_start_left: np.ndarray | None = None
 
 
         # Read-only RB-Y1 connection used only for asynchronous state
@@ -408,6 +421,184 @@ class BoxVr(Teleoperator):
         self._last_mobile_update_time = None
         self._last_action = None
 
+        self._right_a_was_pressed = False
+        self._init_motion_start_time = None
+        self._init_motion_start_torso = None
+        self._init_motion_start_right = None
+        self._init_motion_start_left = None
+
+        # The robot package normally moves to its ready pose before the
+        # teleoperator connects. Capture that measured Cartesian pose once and
+        # use it as the A-button init target for this session.
+        if (
+            self._init_torso_pose is None
+            and self._init_right_pose is None
+            and self._init_left_pose is None
+        ):
+            self._capture_init_pose()
+
+    def _capture_init_pose(self) -> None:
+        torso_pose, right_pose, left_pose = self._get_cached_robot_poses()
+
+        self._init_torso_pose = (
+            None if torso_pose is None else torso_pose.copy()
+        )
+        self._init_right_pose = (
+            None if right_pose is None else right_pose.copy()
+        )
+        self._init_left_pose = (
+            None if left_pose is None else left_pose.copy()
+        )
+
+        logger.info(
+            "Captured BoxVr Cartesian init pose "
+            "(torso=%s, right=%s, left=%s).",
+            self._init_torso_pose is not None,
+            self._init_right_pose is not None,
+            self._init_left_pose is not None,
+        )
+
+    @staticmethod
+    def _interpolate_pose(
+        start_pose: np.ndarray,
+        target_pose: np.ndarray,
+        alpha: float,
+    ) -> np.ndarray:
+        """Interpolate translation and rotation between two poses."""
+
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        pose = np.eye(4, dtype=np.float64)
+
+        pose[:3, 3] = (
+            start_pose[:3, 3] * (1.0 - alpha)
+            + target_pose[:3, 3] * alpha
+        )
+
+        relative_rotation = (
+            start_pose[:3, :3].T @ target_pose[:3, :3]
+        )
+        relative_rotvec = R.from_matrix(
+            relative_rotation
+        ).as_rotvec()
+
+        pose[:3, :3] = (
+            start_pose[:3, :3]
+            @ R.from_rotvec(relative_rotvec * alpha).as_matrix()
+        )
+        return pose
+
+    def _start_init_pose_motion(
+        self,
+        torso_robot_pose: np.ndarray | None,
+        right_robot_pose: np.ndarray | None,
+        left_robot_pose: np.ndarray | None,
+    ) -> None:
+        """Start a smooth Cartesian return to the session init pose."""
+
+        duration_s = float(self.config.init_pose_duration_s)
+        if not np.isfinite(duration_s) or duration_s <= 0.0:
+            raise ValueError(
+                "init_pose_duration_s must be a positive finite value."
+            )
+
+        self._init_motion_start_time = time.monotonic()
+        self._init_motion_start_torso = (
+            None if torso_robot_pose is None else torso_robot_pose.copy()
+        )
+        self._init_motion_start_right = (
+            None if right_robot_pose is None else right_robot_pose.copy()
+        )
+        self._init_motion_start_left = (
+            None if left_robot_pose is None else left_robot_pose.copy()
+        )
+
+        # A-button reset has priority over driving. Stop the base immediately.
+        self._mobile_linear_velocity.fill(0.0)
+        self._mobile_angular_velocity = 0.0
+        self._last_mobile_update_time = None
+
+        logger.info(
+            "Right A pressed. Returning to Cartesian init pose over %.2f s.",
+            duration_s,
+        )
+
+    def _build_init_pose_action(self, packet: Any) -> RobotAction:
+        """Build one interpolation step toward the captured init pose."""
+
+        if self._init_motion_start_time is None:
+            raise RuntimeError("Init-pose motion has not been started.")
+
+        duration_s = float(self.config.init_pose_duration_s)
+        elapsed_s = time.monotonic() - self._init_motion_start_time
+        progress = float(np.clip(elapsed_s / duration_s, 0.0, 1.0))
+
+        # Smoothstep: zero velocity at both the beginning and the end.
+        alpha = progress * progress * (3.0 - 2.0 * progress)
+        action: RobotAction = {}
+
+        if (
+            self.config.use_torso
+            and self._init_torso_pose is not None
+            and self._init_motion_start_torso is not None
+        ):
+            torso_target = self._interpolate_pose(
+                self._init_motion_start_torso,
+                self._init_torso_pose,
+                alpha,
+            )
+            self.torso_state.set_hold_target(torso_target)
+            action.update(
+                pose_to_action(pose=torso_target, prefix="torso_ee")
+            )
+
+        if (
+            self.config.use_right_arm
+            and self._init_right_pose is not None
+            and self._init_motion_start_right is not None
+        ):
+            right_target = self._interpolate_pose(
+                self._init_motion_start_right,
+                self._init_right_pose,
+                alpha,
+            )
+            self.right_state.set_hold_target(right_target)
+            action.update(
+                pose_to_action(pose=right_target, prefix="right_ee")
+            )
+            if self.config.use_gripper:
+                action[RIGHT_GRIPPER_FEATURE] = float(packet.right.trigger)
+
+        if (
+            self.config.use_left_arm
+            and self._init_left_pose is not None
+            and self._init_motion_start_left is not None
+        ):
+            left_target = self._interpolate_pose(
+                self._init_motion_start_left,
+                self._init_left_pose,
+                alpha,
+            )
+            self.left_state.set_hold_target(left_target)
+            action.update(
+                pose_to_action(pose=left_target, prefix="left_ee")
+            )
+            if self.config.use_gripper:
+                action[LEFT_GRIPPER_FEATURE] = float(packet.left.trigger)
+
+        if self.config.use_mobile_base:
+            action.update({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+
+        if progress >= 1.0:
+            self._init_motion_start_time = None
+            self._init_motion_start_torso = None
+            self._init_motion_start_right = None
+            self._init_motion_start_left = None
+            logger.info("Cartesian init pose reached.")
+
+        action = self._fill_missing_features(action)
+        self._last_action = dict(action)
+        return action
+
     def update_robot_observation(
         self,
         observation: dict[str, Any],
@@ -513,6 +704,26 @@ class BoxVr(Teleoperator):
         torso_robot_pose, right_robot_pose, left_robot_pose = (
             self._get_cached_robot_poses()
         )
+
+        right_a_pressed = bool(packet.right.primary_button)
+        right_a_rising_edge = (
+            right_a_pressed and not self._right_a_was_pressed
+        )
+        self._right_a_was_pressed = right_a_pressed
+
+        if (
+            self.config.enable_init_pose_button
+            and right_a_rising_edge
+        ):
+            self._start_init_pose_motion(
+                torso_robot_pose,
+                right_robot_pose,
+                left_robot_pose,
+            )
+
+        # While returning to init, ignore grip/Y/thumbstick commands.
+        if self._init_motion_start_time is not None:
+            return self._build_init_pose_action(packet)
 
         action: RobotAction = {}
 
@@ -818,6 +1029,15 @@ class BoxVr(Teleoperator):
         self._mobile_angular_velocity = 0.0
         self._last_mobile_update_time = None
         self._last_action = None
+
+        self._init_torso_pose = None
+        self._init_right_pose = None
+        self._init_left_pose = None
+        self._right_a_was_pressed = False
+        self._init_motion_start_time = None
+        self._init_motion_start_torso = None
+        self._init_motion_start_right = None
+        self._init_motion_start_left = None
 
     def _handle_missing_packet(self) -> RobotAction:
         """Return the previous action when a UDP packet is unavailable."""

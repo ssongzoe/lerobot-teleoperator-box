@@ -62,6 +62,16 @@ class ArmControlState:
         self._robot_start_pose = None
         self._last_target_pose = None
 
+    def set_hold_target(self, pose: np.ndarray) -> np.ndarray:
+        """Replace the held target and clear the controller clutch anchors."""
+
+        pose = self._validate_pose(pose, name="pose")
+        self._is_following = False
+        self._controller_start_pose = None
+        self._robot_start_pose = None
+        self._last_target_pose = pose.copy()
+        return self.last_target_pose
+
     def update(
         self,
         *,
@@ -440,6 +450,16 @@ class TorsoControlState:
         self._torso_start_pose = None
         self._last_target_pose = None
 
+    def set_hold_target(self, pose: np.ndarray) -> np.ndarray:
+        """Replace the held torso target and clear the HMD clutch anchors."""
+
+        pose = ArmControlState._validate_pose(pose, name="pose")
+        self._is_following = False
+        self._head_start_pose = None
+        self._torso_start_pose = None
+        self._last_target_pose = pose.copy()
+        return self.last_target_pose
+
     def update(
         self,
         *,
@@ -475,18 +495,11 @@ class TorsoControlState:
                 raise ValueError(
                     f"{name} must be a finite value greater than or equal to zero."
                 )
-            
+
         if not both_grips_pressed or head_pose is None:
             self._is_following = False
             self._head_start_pose = None
             self._torso_start_pose = None
-
-            # Initialize the torso hold target once from the measured pose.
-            # Without this, BoxVr falls back to the current measured pose every
-            # frame, causing any physical drift to become the next command target.
-            if self._last_target_pose is None and robot_pose is not None:
-                self._last_target_pose = robot_pose.copy()
-
             return self.last_target_pose
 
         if not self._is_following:
