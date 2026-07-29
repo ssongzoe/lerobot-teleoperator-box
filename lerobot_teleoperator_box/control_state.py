@@ -440,6 +440,26 @@ class TorsoControlState:
         self._torso_start_pose = None
         self._last_target_pose = None
 
+    def synchronize_to_robot_pose(self, robot_pose: np.ndarray) -> np.ndarray:
+        """Use the measured torso pose as the new hold target.
+
+        This is used while the mobile base is moving and the torso clutch is
+        released. Resetting the clutch anchors ensures that the next clutch
+        press starts from the then-current measured torso pose.
+        """
+
+        robot_pose = ArmControlState._validate_pose(
+            robot_pose,
+            name="robot_pose",
+        )
+
+        self._is_following = False
+        self._head_start_pose = None
+        self._torso_start_pose = None
+        self._last_target_pose = robot_pose.copy()
+
+        return self.last_target_pose
+
     def update(
         self,
         *,
