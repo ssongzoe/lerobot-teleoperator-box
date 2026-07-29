@@ -62,6 +62,19 @@ class ArmControlState:
         self._robot_start_pose = None
         self._last_target_pose = None
 
+    def set_hold_target(self, pose: np.ndarray) -> np.ndarray:
+        """Replace the arm hold target and clear VR clutch anchors."""
+
+        pose = self._validate_pose(
+            pose,
+            name="pose",
+        )
+        self._is_following = False
+        self._controller_start_pose = None
+        self._robot_start_pose = None
+        self._last_target_pose = pose.copy()
+        return self.last_target_pose
+
     def update(
         self,
         *,
