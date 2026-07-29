@@ -48,13 +48,20 @@ class BoxVrConfig(TeleoperatorConfig):
     use_right_arm: bool = True
     use_left_arm: bool = True
 
-    # Fixed torso-pose toggle. By default, each rising edge of the Meta Quest
-    # left-controller Y button alternates A -> B -> A. Values are the six
-    # torso joint angles in degrees and are converted to Cartesian targets by FK.
+    # Fixed torso-pose toggle. Each rising edge of the Meta Quest
+    # left-controller Y button alternates A -> B -> A. Pose A is intentionally
+    # the pose different from the startup/init posture, so the first Y press
+    # causes an immediate visible transition.
     torso_toggle_button: str = "left_secondary"
-    torso_pose_a_deg: tuple[float, ...] = (0.0, 55.0, -60.0, 7.0, 0.0, 0.0)
-    torso_pose_b_deg: tuple[float, ...] = (0.0, 82.0, -91.0, 30.0, -2.0, 0.0)
+    torso_pose_a_deg: tuple[float, ...] = (0.0, 82.0, -91.0, 30.0, -2.0, 0.0)
+    torso_pose_b_deg: tuple[float, ...] = (0.0, 55.0, -60.0, 7.0, 0.0, 0.0)
     torso_preset_duration_s: float = 1.5
+
+    # Return torso and both arms to the Cartesian pose captured at connection.
+    # Meta Quest right primary is the A button.
+    enable_init_pose_button: bool = True
+    init_pose_button: str = "right_primary"
+    init_pose_duration_s: float = 2.0
 
     # During a torso preset transition, translate both arm Cartesian targets
     # by the same base-frame XYZ displacement as the torso EE. Arm orientations

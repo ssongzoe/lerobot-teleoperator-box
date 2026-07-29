@@ -93,12 +93,24 @@ class BoxVr(Teleoperator):
         self._torso_transition_target_pose: np.ndarray | None = None
 
         # Arm targets captured at the Y-button rising edge. During the torso
-        # transition, only their base-frame Z coordinate follows the torso EE
-        # height change; X/Y and orientation stay exactly as captured.
+        # transition, both arms receive the same base-frame XYZ translation as
+        # the torso EE while their orientations remain unchanged.
         self._torso_transition_right_arm_start_pose: np.ndarray | None = None
         self._torso_transition_left_arm_start_pose: np.ndarray | None = None
 
-        # A preset transition takes ownership of the arm targets. Require each
+        # Cartesian init pose captured when the teleoperator connects. The
+        # right-controller A button returns torso and both arms to these poses.
+        self._init_torso_pose: np.ndarray | None = None
+        self._init_right_arm_pose: np.ndarray | None = None
+        self._init_left_arm_pose: np.ndarray | None = None
+
+        self._init_pose_button_was_pressed = False
+        self._init_transition_start_time: float | None = None
+        self._init_transition_torso_start_pose: np.ndarray | None = None
+        self._init_transition_right_start_pose: np.ndarray | None = None
+        self._init_transition_left_start_pose: np.ndarray | None = None
+
+        # An automatic transition takes ownership of the arm targets. Require each
         # VR grip to be released once before clutch control can re-engage, so
         # a grip held throughout the transition cannot re-anchor to a lagging
         # measured pose on the very next frame.
@@ -528,7 +540,62 @@ class BoxVr(Teleoperator):
         self._right_grip_blocked_until_release = False
         self._left_grip_blocked_until_release = False
 
+        self._init_pose_button_was_pressed = False
+        self._init_transition_start_time = None
+        self._init_transition_torso_start_pose = None
+        self._init_transition_right_start_pose = None
+        self._init_transition_left_start_pose = None
+
         self._last_action = None
+        self._capture_init_poses()
+
+    def _capture_init_poses(self) -> None:
+        """Capture and hold the Cartesian pose present at teleop startup."""
+
+        with self._robot_pose_lock:
+            torso_pose = (
+                None
+                if self._torso_robot_pose is None
+                else self._torso_robot_pose.copy()
+            )
+            right_pose = (
+                None
+                if self._right_robot_pose is None
+                else self._right_robot_pose.copy()
+            )
+            left_pose = (
+                None
+                if self._left_robot_pose is None
+                else self._left_robot_pose.copy()
+            )
+
+        if self.config.use_torso and torso_pose is None:
+            raise RuntimeError(
+                "Cannot capture init pose: current torso EE pose is unavailable."
+            )
+        if self.config.use_right_arm and right_pose is None:
+            raise RuntimeError(
+                "Cannot capture init pose: current right EE pose is unavailable."
+            )
+        if self.config.use_left_arm and left_pose is None:
+            raise RuntimeError(
+                "Cannot capture init pose: current left EE pose is unavailable."
+            )
+
+        self._init_torso_pose = torso_pose
+        self._init_right_arm_pose = right_pose
+        self._init_left_arm_pose = left_pose
+
+        # Initialize hold targets once so startup measurement noise is not
+        # adopted as a new command target on every frame.
+        if torso_pose is not None:
+            self.torso_state.set_hold_target(torso_pose)
+        if right_pose is not None:
+            self.right_state.set_hold_target(right_pose)
+        if left_pose is not None:
+            self.left_state.set_hold_target(left_pose)
+
+        logger.info("Captured Cartesian init pose for A-button return.")
 
     def update_robot_observation(
         self,
@@ -605,6 +672,171 @@ class BoxVr(Teleoperator):
             f"{self.config.torso_toggle_button!r}. Expected one of: "
             "left_secondary, left_primary, right_secondary, right_primary."
         )
+
+    def _init_pose_pressed(self, packet: Any) -> bool:
+        """Return whether the configured init-pose button is held."""
+
+        button = str(self.config.init_pose_button).strip().lower()
+
+        if button == "left_secondary":
+            return bool(packet.left.secondary_button)
+        if button == "left_primary":
+            return bool(packet.left.primary_button)
+        if button == "right_secondary":
+            return bool(packet.right.secondary_button)
+        if button == "right_primary":
+            return bool(packet.right.primary_button)
+
+        raise ValueError(
+            "Unsupported init_pose_button="
+            f"{self.config.init_pose_button!r}. Expected one of: "
+            "left_secondary, left_primary, right_secondary, right_primary."
+        )
+
+    def _start_init_pose_transition(
+        self,
+        torso_robot_pose: np.ndarray | None,
+        right_robot_pose: np.ndarray | None,
+        left_robot_pose: np.ndarray | None,
+    ) -> None:
+        """Return torso and arms to the Cartesian pose captured at startup."""
+
+        def choose_start(
+            hold_pose: np.ndarray | None,
+            measured_pose: np.ndarray | None,
+            *,
+            component: str,
+        ) -> np.ndarray | None:
+            if hold_pose is not None:
+                return hold_pose.copy()
+            if measured_pose is not None:
+                return measured_pose.copy()
+            if component == "disabled":
+                return None
+            raise RuntimeError(
+                f"Current {component} pose is unavailable for init transition."
+            )
+
+        if self.config.use_torso and self._init_torso_pose is None:
+            raise RuntimeError("Initial torso pose has not been captured.")
+        if self.config.use_right_arm and self._init_right_arm_pose is None:
+            raise RuntimeError("Initial right-arm pose has not been captured.")
+        if self.config.use_left_arm and self._init_left_arm_pose is None:
+            raise RuntimeError("Initial left-arm pose has not been captured.")
+
+        self._init_transition_torso_start_pose = choose_start(
+            self.torso_state.last_target_pose,
+            torso_robot_pose,
+            component="torso" if self.config.use_torso else "disabled",
+        )
+        self._init_transition_right_start_pose = choose_start(
+            self.right_state.last_target_pose,
+            right_robot_pose,
+            component="right arm" if self.config.use_right_arm else "disabled",
+        )
+        self._init_transition_left_start_pose = choose_start(
+            self.left_state.last_target_pose,
+            left_robot_pose,
+            component="left arm" if self.config.use_left_arm else "disabled",
+        )
+
+        # Cancel any torso A/B transition before taking control.
+        self._torso_transition_start_time = None
+        self._torso_transition_start_pose = None
+        self._torso_transition_target_pose = None
+        self._torso_transition_right_arm_start_pose = None
+        self._torso_transition_left_arm_start_pose = None
+
+        self._init_transition_start_time = time.monotonic()
+
+        # The startup pose matches preset B after the configured A/B swap, so
+        # the next Y press should select preset A immediately.
+        self._torso_next_preset_index = 0
+
+        self._right_grip_blocked_until_release = self.config.use_right_arm
+        self._left_grip_blocked_until_release = self.config.use_left_arm
+
+        # Stop the base while the body returns to its initial pose.
+        self._mobile_linear_velocity.fill(0.0)
+        self._mobile_angular_velocity = 0.0
+        self._last_mobile_update_time = time.monotonic()
+
+        logger.info("A button: returning torso and arms to init pose.")
+
+    def _update_init_pose_transition(
+        self,
+    ) -> tuple[
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        bool,
+    ]:
+        """Interpolate torso and both arms toward the captured init pose."""
+
+        if self._init_transition_start_time is None:
+            return None, None, None, False
+
+        duration_s = float(self.config.init_pose_duration_s)
+        if not np.isfinite(duration_s) or duration_s <= 0.0:
+            raise ValueError(
+                "init_pose_duration_s must be a positive finite value."
+            )
+
+        progress = (
+            time.monotonic() - self._init_transition_start_time
+        ) / duration_s
+        progress = float(np.clip(progress, 0.0, 1.0))
+        smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+
+        torso_target = None
+        right_target = None
+        left_target = None
+
+        if (
+            self.config.use_torso
+            and self._init_transition_torso_start_pose is not None
+            and self._init_torso_pose is not None
+        ):
+            torso_target = self._interpolate_pose(
+                self._init_transition_torso_start_pose,
+                self._init_torso_pose,
+                smooth_progress,
+            )
+            self.torso_state.set_hold_target(torso_target)
+
+        if (
+            self.config.use_right_arm
+            and self._init_transition_right_start_pose is not None
+            and self._init_right_arm_pose is not None
+        ):
+            right_target = self._interpolate_pose(
+                self._init_transition_right_start_pose,
+                self._init_right_arm_pose,
+                smooth_progress,
+            )
+            self.right_state.set_hold_target(right_target)
+
+        if (
+            self.config.use_left_arm
+            and self._init_transition_left_start_pose is not None
+            and self._init_left_arm_pose is not None
+        ):
+            left_target = self._interpolate_pose(
+                self._init_transition_left_start_pose,
+                self._init_left_arm_pose,
+                smooth_progress,
+            )
+            self.left_state.set_hold_target(left_target)
+
+        transition_finished = progress >= 1.0
+        if transition_finished:
+            self._init_transition_start_time = None
+            self._init_transition_torso_start_pose = None
+            self._init_transition_right_start_pose = None
+            self._init_transition_left_start_pose = None
+
+        return torso_target, right_target, left_target, transition_finished
+
 
     def _start_torso_preset_transition(
         self,
@@ -820,21 +1052,111 @@ class BoxVr(Teleoperator):
         )
 
         action: RobotAction = {}
+
+        init_pressed = self._init_pose_pressed(packet)
+        init_rising_edge = (
+            self.config.enable_init_pose_button
+            and init_pressed
+            and not self._init_pose_button_was_pressed
+        )
+        self._init_pose_button_was_pressed = init_pressed
+
+        toggle_pressed = (
+            self._torso_toggle_pressed(packet)
+            if self.config.use_torso
+            else False
+        )
+        toggle_rising_edge = (
+            toggle_pressed and not self._torso_toggle_was_pressed
+        )
+        self._torso_toggle_was_pressed = toggle_pressed
+
+        if init_rising_edge:
+            self._start_init_pose_transition(
+                torso_robot_pose,
+                right_robot_pose,
+                left_robot_pose,
+            )
+        elif (
+            toggle_rising_edge
+            and self._init_transition_start_time is None
+        ):
+            self._start_torso_preset_transition(
+                torso_robot_pose,
+                right_robot_pose,
+                left_robot_pose,
+            )
+
+        # A-button init return has priority over Y torso presets and VR clutch.
+        if self._init_transition_start_time is not None:
+            (
+                torso_target,
+                right_target,
+                left_target,
+                _,
+            ) = self._update_init_pose_transition()
+
+            if self.config.use_torso:
+                if torso_target is None:
+                    raise RuntimeError(
+                        "Init transition did not produce a torso target."
+                    )
+                action.update(
+                    pose_to_action(
+                        pose=torso_target,
+                        prefix="torso_ee",
+                    )
+                )
+
+            if self.config.use_right_arm:
+                if right_target is None:
+                    raise RuntimeError(
+                        "Init transition did not produce a right-arm target."
+                    )
+                action.update(
+                    pose_to_action(
+                        pose=right_target,
+                        prefix="right_ee",
+                    )
+                )
+                if self.config.use_gripper:
+                    action[RIGHT_GRIPPER_FEATURE] = float(
+                        packet.right.trigger
+                    )
+
+            if self.config.use_left_arm:
+                if left_target is None:
+                    raise RuntimeError(
+                        "Init transition did not produce a left-arm target."
+                    )
+                action.update(
+                    pose_to_action(
+                        pose=left_target,
+                        prefix="left_ee",
+                    )
+                )
+                if self.config.use_gripper:
+                    action[LEFT_GRIPPER_FEATURE] = float(
+                        packet.left.trigger
+                    )
+
+            if self.config.use_mobile_base:
+                action.update(
+                    {
+                        "x.vel": 0.0,
+                        "y.vel": 0.0,
+                        "theta.vel": 0.0,
+                    }
+                )
+
+            action = self._fill_missing_features(action)
+            self._last_action = dict(action)
+            return action
+
         torso_arm_translation_delta: np.ndarray | None = None
         torso_transition_finished = False
 
         if self.config.use_torso:
-            toggle_pressed = self._torso_toggle_pressed(packet)
-
-            if toggle_pressed and not self._torso_toggle_was_pressed:
-                self._start_torso_preset_transition(
-                    torso_robot_pose,
-                    right_robot_pose,
-                    left_robot_pose,
-                )
-
-            self._torso_toggle_was_pressed = toggle_pressed
-
             (
                 torso_target,
                 torso_arm_translation_delta,
@@ -887,7 +1209,6 @@ class BoxVr(Teleoperator):
                     ),
                 )
 
-                # 클러치 초기화 전에는 현재 로봇 EE pose 유지
                 if right_target is None:
                     if right_robot_pose is None:
                         raise RuntimeError(
@@ -912,8 +1233,6 @@ class BoxVr(Teleoperator):
                 torso_arm_translation_delta is not None
                 and self._torso_transition_left_arm_start_pose is not None
             ):
-                # Apply exactly the same base-frame XYZ translation as the
-                # right arm so the relative bimanual object pose is preserved.
                 left_target = self._apply_arm_translation_offset(
                     self._torso_transition_left_arm_start_pose,
                     torso_arm_translation_delta,
@@ -941,7 +1260,6 @@ class BoxVr(Teleoperator):
                     ),
                 )
 
-                # 클러치 초기화 전에는 현재 로봇 EE pose 유지
                 if left_target is None:
                     if left_robot_pose is None:
                         raise RuntimeError(
