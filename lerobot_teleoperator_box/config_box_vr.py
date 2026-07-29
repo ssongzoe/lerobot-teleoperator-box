@@ -76,16 +76,20 @@ class BoxVrConfig(TeleoperatorConfig):
     # Ignore small thumbstick drift around the neutral position.
     mobile_thumbstick_deadzone: float = 0.10
 
-    # Per-update acceleration and damping gains retained from the original
-    # RB-Y1 VR example. Final commands are clipped by the speed limits below.
-    mobile_linear_acceleration_gain: float = 0.30
-    mobile_angular_acceleration_gain: float = 0.70
-    mobile_linear_damping_gain: float = 0.30
-    mobile_angular_damping_gain: float = 0.50
+    # Time required to ramp from zero to the configured maximum speed while
+    # the thumbstick is held fully. Releasing the stick ramps back to zero
+    # over ``mobile_deceleration_time_s`` instead of stopping abruptly.
+    mobile_acceleration_time_s: float = 0.50
+    mobile_deceleration_time_s: float = 0.50
 
-    # Final body-frame velocity limits.
-    mobile_max_linear_velocity_mps: float = 0.70
-    mobile_max_angular_velocity_rps: float = 0.70
+    # Final body-frame velocity limits. These defaults are 70% of the previous
+    # 0.70 m/s and 0.70 rad/s limits.
+    mobile_max_linear_velocity_mps: float = 0.49
+    mobile_max_angular_velocity_rps: float = 0.49
+
+    # Cap the elapsed time used by one velocity update. This prevents a single
+    # delayed control-loop iteration from causing a large velocity jump.
+    mobile_max_update_dt_s: float = 0.10
 
     # Require the controller clutch button before updating a target.
     require_initialization_button: bool = True
