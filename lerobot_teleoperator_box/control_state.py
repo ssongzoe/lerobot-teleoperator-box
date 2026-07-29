@@ -62,6 +62,19 @@ class ArmControlState:
         self._robot_start_pose = None
         self._last_target_pose = None
 
+    def set_hold_target(self, pose: np.ndarray) -> np.ndarray:
+        """Replace the arm hold target and clear VR clutch anchors."""
+
+        pose = self._validate_pose(
+            pose,
+            name="pose",
+        )
+        self._is_following = False
+        self._controller_start_pose = None
+        self._robot_start_pose = None
+        self._last_target_pose = pose.copy()
+        return self.last_target_pose
+
     def update(
         self,
         *,
@@ -405,3 +418,134 @@ class ArmControlState:
                 raise ValueError(
                     f"{name} must be greater than or equal to zero."
                 )
+
+class TorsoControlState:
+    """Maintain the HMD clutch anchors and Cartesian torso target.
+
+    The torso follows only while both Quest grip buttons are pressed.  At the
+    rising edge, the current HMD pose and measured ``link_torso_5`` pose are
+    captured as anchors.  Relative HMD rotation and vertical translation are
+    then applied to the torso anchor, matching the original RB-Y1 VR example.
+
+    Horizontal HMD translation is intentionally ignored so leaning forward or
+    sideways does not translate the torso target in the robot base frame.
+    """
+
+    def __init__(self) -> None:
+        self._is_following = False
+        self._head_start_pose: np.ndarray | None = None
+        self._torso_start_pose: np.ndarray | None = None
+        self._last_target_pose: np.ndarray | None = None
+
+    @property
+    def is_following(self) -> bool:
+        return self._is_following
+
+    @property
+    def last_target_pose(self) -> np.ndarray | None:
+        if self._last_target_pose is None:
+            return None
+        return self._last_target_pose.copy()
+
+    def reset(self) -> None:
+        self._is_following = False
+        self._head_start_pose = None
+        self._torso_start_pose = None
+        self._last_target_pose = None
+
+    def set_hold_target(self, pose: np.ndarray) -> np.ndarray:
+        """Replace the torso hold target and clear HMD-follow anchors."""
+
+        pose = ArmControlState._validate_pose(
+            pose,
+            name="pose",
+        )
+        self._is_following = False
+        self._head_start_pose = None
+        self._torso_start_pose = None
+        self._last_target_pose = pose.copy()
+        return self.last_target_pose
+
+    def update(
+        self,
+        *,
+        head_pose: np.ndarray | None,
+        robot_pose: np.ndarray | None,
+        both_grips_pressed: bool,
+        position_scale: float,
+        rotation_scale: float,
+    ) -> np.ndarray | None:
+        """Update and return the torso Cartesian target.
+
+        ``head_pose`` and ``robot_pose`` are 4×4 transforms expressed in the
+        converted Quest frame and RB-Y1 base frame respectively.  Only HMD Z
+        translation and relative rotation are used.
+        """
+
+        if head_pose is not None:
+            head_pose = ArmControlState._validate_pose(
+                head_pose,
+                name="head_pose",
+            )
+        if robot_pose is not None:
+            robot_pose = ArmControlState._validate_pose(
+                robot_pose,
+                name="robot_pose",
+            )
+
+        for name, value in {
+            "position_scale": position_scale,
+            "rotation_scale": rotation_scale,
+        }.items():
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{name} must be a finite value greater than or equal to zero."
+                )
+            
+        if not both_grips_pressed or head_pose is None:
+            self._is_following = False
+            self._head_start_pose = None
+            self._torso_start_pose = None
+
+            # Initialize the torso hold target once from the measured pose.
+            # Without this, BoxVr falls back to the current measured pose every
+            # frame, causing any physical drift to become the next command target.
+            if self._last_target_pose is None and robot_pose is not None:
+                self._last_target_pose = robot_pose.copy()
+
+            return self.last_target_pose
+
+        if not self._is_following:
+            anchor_pose = robot_pose
+            if anchor_pose is None:
+                anchor_pose = self._last_target_pose
+            if anchor_pose is None:
+                return None
+
+            self._head_start_pose = head_pose.copy()
+            self._torso_start_pose = anchor_pose.copy()
+            self._last_target_pose = anchor_pose.copy()
+            self._is_following = True
+            return self.last_target_pose
+
+        if self._head_start_pose is None or self._torso_start_pose is None:
+            self._is_following = False
+            return self.last_target_pose
+
+        delta = np.linalg.inv(self._head_start_pose) @ head_pose
+
+        # Match the original example: ignore HMD X/Y translation, retain Z.
+        delta[0, 3] = 0.0
+        delta[1, 3] = 0.0
+
+        scaled_delta = ArmControlState._scale_pose_delta(
+            delta,
+            position_scale=position_scale,
+            rotation_scale=rotation_scale,
+        )
+
+        target_pose = self._torso_start_pose @ scaled_delta
+        target_pose[3] = [0.0, 0.0, 0.0, 1.0]
+        self._last_target_pose = target_pose
+
+        return self.last_target_pose

@@ -31,6 +31,14 @@ T_CONV = np.array(
 )
 
 
+def vr_pose_to_rby1(pose: VrPose) -> np.ndarray:
+    """Convert any Quest-tracked pose into the RBY1-compatible frame."""
+
+    quest_pose = pose_to_matrix(pose)
+    converted_pose = T_CONV.T @ quest_pose @ T_CONV
+    return normalize_transform(converted_pose)
+
+
 def controller_pose_to_rby1(
     pose: VrPose,
     *,
@@ -58,15 +66,7 @@ def controller_pose_to_rby1(
             f"side must be 'right' or 'left', received {side!r}."
         )
 
-    quest_pose = pose_to_matrix(pose)
-
-    converted_pose = (
-        T_CONV.T
-        @ quest_pose
-        @ T_CONV
-    )
-
-    return normalize_transform(converted_pose)
+    return vr_pose_to_rby1(pose)
 
 
 def pose_to_matrix(pose: VrPose) -> np.ndarray:

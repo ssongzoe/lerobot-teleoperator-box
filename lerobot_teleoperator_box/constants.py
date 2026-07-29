@@ -9,8 +9,27 @@ from __future__ import annotations
 #
 # Each arm therefore contributes six action values.
 
+TORSO_EE_PREFIX = "torso_ee"
 RIGHT_EE_PREFIX = "right_ee"
 LEFT_EE_PREFIX = "left_ee"
+
+
+# Mobile-base velocity action representation in the robot body frame.
+BASE_VEL_FEATURES: tuple[str, ...] = (
+    "x.vel",
+    "y.vel",
+    "theta.vel",
+)
+
+
+TORSO_EE_FEATURES: tuple[str, ...] = (
+    f"{TORSO_EE_PREFIX}.x",
+    f"{TORSO_EE_PREFIX}.y",
+    f"{TORSO_EE_PREFIX}.z",
+    f"{TORSO_EE_PREFIX}.wx",
+    f"{TORSO_EE_PREFIX}.wy",
+    f"{TORSO_EE_PREFIX}.wz",
+)
 
 
 RIGHT_EE_FEATURES: tuple[str, ...] = (
