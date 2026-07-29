@@ -516,27 +516,6 @@ class BoxVr(Teleoperator):
 
         action: RobotAction = {}
 
-        # Compute the base command before the torso target so the torso can
-        # decide whether to hold a fixed target or follow the measured pose.
-        mobile_action: RobotAction = {}
-        base_is_moving = False
-        if self.config.use_mobile_base:
-            mobile_action = self._update_mobile_base_action(packet)
-
-            motion_threshold = float(
-                self.config.torso_base_motion_threshold
-            )
-            if not np.isfinite(motion_threshold) or motion_threshold < 0.0:
-                raise ValueError(
-                    "torso_base_motion_threshold must be a finite, "
-                    "non-negative value."
-                )
-
-            base_is_moving = any(
-                abs(float(mobile_action[name])) > motion_threshold
-                for name in BASE_VEL_FEATURES
-            )
-
         if self.config.use_torso:
             head_pose = (
                 None
@@ -544,35 +523,15 @@ class BoxVr(Teleoperator):
                 else vr_pose_to_rby1(packet.head.pose)
             )
 
-            torso_clutch_pressed = self._torso_clutch_pressed(packet)
-
-            if (
-                self.config.torso_follow_measured_pose_while_base_moving
-                and base_is_moving
-                and not torso_clutch_pressed
-            ):
-                if torso_robot_pose is None:
-                    raise RuntimeError(
-                        "Current torso EE pose is unavailable while the "
-                        "mobile base is moving."
-                    )
-
-                # Make the latest measured pose the new hold target. This
-                # minimizes Cartesian error during base acceleration and also
-                # prevents a jump back to the pre-drive target after stopping.
-                torso_target = self.torso_state.synchronize_to_robot_pose(
-                    torso_robot_pose
-                )
-            else:
-                torso_target = self.torso_state.update(
-                    head_pose=head_pose,
-                    robot_pose=torso_robot_pose,
-                    # TorsoControlState keeps its legacy argument name, but
-                    # the clutch source is configurable. Default: left Y.
-                    both_grips_pressed=torso_clutch_pressed,
-                    position_scale=self.config.torso_position_scale,
-                    rotation_scale=self.config.torso_rotation_scale,
-                )
+            torso_target = self.torso_state.update(
+                head_pose=head_pose,
+                robot_pose=torso_robot_pose,
+                # TorsoControlState keeps its legacy argument name, but the
+                # clutch source is configurable. Default: left Y button.
+                both_grips_pressed=self._torso_clutch_pressed(packet),
+                position_scale=self.config.torso_position_scale,
+                rotation_scale=self.config.torso_rotation_scale,
+            )
 
             if torso_target is None:
                 if torso_robot_pose is None:
@@ -667,7 +626,7 @@ class BoxVr(Teleoperator):
                 )
 
         if self.config.use_mobile_base:
-            action.update(mobile_action)
+            action.update(self._update_mobile_base_action(packet))
 
         action = self._fill_missing_features(action)
         self._last_action = dict(action)

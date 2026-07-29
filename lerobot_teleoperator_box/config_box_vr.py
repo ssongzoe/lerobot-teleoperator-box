@@ -65,15 +65,6 @@ class BoxVrConfig(TeleoperatorConfig):
     torso_position_scale: float = 1.0
     torso_rotation_scale: float = 1.0
 
-    # When the torso clutch is released and the mobile base is moving, update
-    # the torso hold target from the latest measured torso pose. This prevents
-    # the Cartesian impedance controller from fighting base acceleration.
-    torso_follow_measured_pose_while_base_moving: bool = True
-
-    # The base is considered moving when any commanded body-frame velocity is
-    # greater than this threshold. Units are m/s for x/y and rad/s for yaw.
-    torso_base_motion_threshold: float = 0.02
-
     # Optional gripper control.
     use_gripper: bool = False
 
