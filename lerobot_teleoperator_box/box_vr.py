@@ -12,7 +12,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from lerobot.teleoperators.teleoperator import Teleoperator
-from lerobot.types import RobotAction
+from lerobot.processor import RobotAction
 
 from .config_box_vr import BoxVrConfig
 from .constants import (
