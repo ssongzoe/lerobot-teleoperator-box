@@ -123,9 +123,7 @@ lerobot-teleoperate \
   --teleop.use_right_arm=true \
   --teleop.use_left_arm=true \
   --teleop.use_mobile_base=true \
-  --teleop.use_gripper=false \
-  --teleop.torso_position_scale=0.5 \
-  --teleop.torso_rotation_scale=0.5
+  --teleop.use_gripper=false
 ```
 
 ## Controls
